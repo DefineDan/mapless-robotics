@@ -478,7 +478,7 @@ wheels = [
 [[package]]
 name = "lotis"
 version = "0.2.0"
-source = { editable = "lotis" }
+source = { editable = "external/lotis" }
 dependencies = [
     { name = "gradio" },
     { name = "numpy" },
@@ -517,7 +517,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "lotis", editable = "lotis" }]
+requires-dist = [{ name = "lotis", editable = "external/lotis" }]
 
 [[package]]
 name = "markdown-it-py"

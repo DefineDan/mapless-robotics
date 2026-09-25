@@ -1,9 +1,9 @@
 [submodule "lotis"]
-	path = lotis
+	path = external/lotis
 	url = https://github.com/KTH-RPL/lotis
 [submodule "dinov3"]
-	path = dinov3
+	path = external/dinov3
 	url = https://github.com/facebookresearch/dinov3.git
 [submodule "OpenFrontier"]
-	path = OpenFrontier
+	path = external/OpenFrontier
 	url = https://github.com/cvg/OpenFrontier.git

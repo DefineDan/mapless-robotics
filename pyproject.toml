@@ -16,4 +16,4 @@ requires = ["uv_build>=0.7.10,<0.8"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
-lotis = { path = "lotis", editable = true }
+lotis = { path = "external/lotis", editable = true }
