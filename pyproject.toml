@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "habitat-sim",
     "lotis",
 ]
 
@@ -17,3 +18,9 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 lotis = { path = "external/lotis", editable = true }
+habitat-sim = { workspace = true, editable = true }
+
+[tool.uv.workspace]
+members = [
+    "external/habitat-sim",
+]

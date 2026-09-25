@@ -1,7 +1,9 @@
 # custom
 models/
-data/
+scene_datasets/
 
+# habitat collection
+src/test_habitat/runs
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

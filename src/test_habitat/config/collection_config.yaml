@@ -1,0 +1,48 @@
+# Standalone config for interactive Habitat trajectory collection.
+# Values are fixed scalars, not data-generation augmentation ranges.
+
+GENERAL:
+  RANDOM_SEED: 1
+
+SIM_SETTINGS:
+  WIDTH: 512
+  HEIGHT: 512
+  DEFAULT_AGENT: 0
+  SENSOR_HEIGHT: 1.5
+  COLOR_SENSOR: true
+  DEPTH_SENSOR: true
+  ENABLE_PHYSICS: false
+  CAMERA_FOV: 120.0
+
+ACTIONS:
+  MOVE_FORWARD: 0.25
+  TURN_ANGLE: 30.0
+
+# Used by automatic_control.py to generate and traverse random navmesh paths.
+TRAJECTORY_SETTINGS:
+  TRAJECTORIES_PER_SCENE: 20  # Default trajectory count, overridable with --num-trajectories
+  MIN_PATH_DISTANCE: 15.0 #3.0  # Minimum geodesic distance between sampled start/end points (meters)
+  MAX_TRAJECTORY_LENGTH: 40.0 #30.0  # Maximum simulation time per trajectory (seconds)
+  CONTROL_FREQUENCY: 10.0  # Controller frequency (Hz)
+  FRAME_SKIP: 1  # Physics substeps per control update
+  LOOK_AHEAD_DISTANCE: 0.4  # Pure-pursuit look-ahead distance along the path (meters)
+  MAX_FORWARD_SPEED: 0.7  # meters/second
+  MAX_TURN_SPEED: 0.8  # radians/second
+  ARRIVAL_DISTANCE: 0.3  # Stop once within this distance of the path's end (meters)
+  SAVE_EVERY_N_FRAMES: [1, 2] #[2, 8]  # Uniformly-sampled frame-save cadence range
+
+DATASET:
+  # >>> If scenes aren't found, this is almost certainly what needs changing. <<<
+  # Base directory that scenes_directory/scene_dataset_config below are relative to.
+  # Override without editing this file by setting the HABITAT_DATA_PATH env var.
+  DATA_PATH: "/home/finn/cris_ws/mapless-robotics"
+  SCENE_DATASETS:
+    - name: "HM3D Train"
+      scene_dataset_config: "scene_datasets/hm3d/hm3d_annotated_basis.scene_dataset_config.json"
+      scenes_directory: "scene_datasets/hm3d/train/"
+      scene_pattern: "*/*.basis.glb"
+      needs_lighting: false
+  SCENE_SELECTION:
+    RANDOM: true
+    MAX_SCENES: 100
+    SCENE_LIST: []
