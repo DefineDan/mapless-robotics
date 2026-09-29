@@ -1,21 +1,27 @@
 """Teach and repeat with LoTIS.
 
-1. Teach: walk through the scene (same keys as walk.py). Frames are recorded as you move.
-2. Press Enter to stop recording. The frames are saved to runs/ and encoded with LoTIS.
+1. Teach: walk through the scene. Frames are recorded as you move.
+2. Press Enter to stop recording. The frames are saved to data/runs/ and encoded with LoTIS.
 3. Repeat: the agent is put back at the start and LoTIS drives it to where you stopped.
 
     python -m mapless_robotics.teach_repeat --index 25
 
-Press q/esc at any time to quit.
+Everything is shown in Rerun. Keys are read from the terminal, so keep it focused:
+arrows = move (left/right strafe), a/d = turn, w/s = look up/down, Enter = stop recording,
+q = quit (Ctrl+C during navigation).
 """
 
 import argparse
+import sys
+import termios
+import tty
 from datetime import datetime
 from pathlib import Path
 
-import cv2
 import habitat_sim
 import numpy as np
+import rerun as rr
+import rerun.blueprint as rrb
 import yaml
 from habitat_sim.utils.common import (
     angle_between_quats,
@@ -25,12 +31,24 @@ from habitat_sim.utils.common import (
 from nav_eval.methods.lotis import LoTISNavigationMethod
 from PIL import Image
 
-from mapless_robotics.walk import KEY_TO_ACTION, QUIT, SCENES_DIR, make_sim
+from mapless_robotics.walk import SCENES_DIR, make_sim
 
 LOTIS_CONFIG = Path("lotis/nav_eval/configs/lotis_method.yaml")
 DATA_DIR = Path("data/runs")
-WINDOW = "teach & repeat"
-ENTER = {13, 10}
+
+# Terminal key -> Habitat action (arrow keys arrive as escape sequences)
+KEY_TO_ACTION = {
+    "\x1b[A": "move_forward",
+    "\x1b[B": "move_backward",
+    "\x1b[D": "move_left",
+    "\x1b[C": "move_right",
+    "a": "turn_left",
+    "d": "turn_right",
+    "w": "look_up",
+    "s": "look_down",
+}
+ENTER = {"\n", "\r"}
+QUIT = {"q"}
 
 # Teaching: save a frame every time we moved or turned this much since the last one
 RECORD_EVERY_M = 0.25
@@ -50,6 +68,20 @@ def turned(a: habitat_sim.AgentState, b: habitat_sim.AgentState) -> float:
     )
 
 
+def read_key() -> str:
+    """Wait for a single key press in the terminal (no Enter needed)."""
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        key = sys.stdin.read(1)
+        if key == "\x1b":  # arrow keys: ESC [ A/B/C/D
+            key += sys.stdin.read(2)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return key
+
+
 def teach(
     sim: habitat_sim.Simulator,
 ) -> tuple[list[np.ndarray], list[habitat_sim.AgentState]]:
@@ -57,6 +89,7 @@ def teach(
     agent = sim.get_agent(0)
     obs = sim.get_sensor_observations()
     frames, states = [], []
+    step = 0
     while True:
         state = agent.get_state()
         if not states or (
@@ -66,14 +99,13 @@ def teach(
             frames.append(obs["rgb"][:, :, :3].copy())
             states.append(state)
 
-        frame = cv2.cvtColor(obs["rgb"], cv2.COLOR_RGBA2BGR)
-        text = f"RECORDING  {len(frames)} frames  (Enter to stop)"
-        cv2.putText(
-            frame, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2
-        )
-        cv2.imshow(WINDOW, frame)
+        rr.set_time("step", sequence=step)
+        rr.log("camera", rr.Image(obs["rgb"][:, :, :3]))
+        rr.log("last_recorded_frame", rr.Image(frames[-1]))
+        print(f"\rRECORDING  {len(frames)} frames  (Enter to stop)", end="", flush=True)
 
-        key = cv2.waitKeyEx(0)
+        key = read_key()
+        step += 1
         if key in QUIT:
             raise SystemExit
         if key in ENTER:
@@ -82,6 +114,7 @@ def teach(
             ):  # also keep the spot where we stopped: that's the goal
                 frames.append(obs["rgb"][:, :, :3].copy())
                 states.append(state)
+            print()
             return frames, states
         if key in KEY_TO_ACTION:
             obs = sim.step(KEY_TO_ACTION[key])
@@ -107,26 +140,6 @@ def step_velocity(sim: habitat_sim.Simulator, linear: float, angular: float) -> 
     agent.set_state(state, reset_sensors=False)
 
 
-def draw(rgb: np.ndarray, result, goal: np.ndarray) -> np.ndarray:
-    """Camera view with the LoTIS predictions (blue = start, red = end), goal frame next to it."""
-    frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    h, w = frame.shape[:2]
-    n = len(result.visibility)
-    for i, ((row, col), vis) in enumerate(zip(result.coords, result.visibility)):
-        if vis > 0.5:
-            color = cv2.applyColorMap(
-                np.uint8([[255 * i // max(1, n - 1)]]), cv2.COLORMAP_JET
-            )[0, 0]
-            cv2.circle(
-                frame,
-                (int((col + 1) / 2 * w), int((row + 1) / 2 * h)),
-                6,
-                color.tolist(),
-                -1,
-            )
-    return np.hstack([frame, cv2.cvtColor(goal, cv2.COLOR_RGB2BGR)])
-
-
 def repeat(
     sim,
     method: LoTISNavigationMethod,
@@ -142,13 +155,17 @@ def repeat(
     fx = (w / 2) / np.tan(np.deg2rad(HFOV) / 2)
     intrinsics = np.array([[fx, 0, w / 2], [0, fx, h / 2], [0, 0, 1]], dtype=np.float32)
 
+    rr.log("goal", rr.Image(goal_frame), static=True)
     for step in range(MAX_STEPS):
         rgb = sim.get_sensor_observations()["rgb"][:, :, :3]
-        action = method.act({"rgb_pil": Image.fromarray(rgb), "intrinsics": intrinsics})
+        obs = {"rgb": rgb, "rgb_pil": Image.fromarray(rgb), "intrinsics": intrinsics}
+        action = method.act(obs)
 
-        cv2.imshow(WINDOW, draw(rgb, method._last_result, goal_frame))
-        if cv2.waitKeyEx(1) in QUIT:
-            return
+        # Camera + LoTIS predictions on top (blue = start, red = end of the trajectory).
+        # method.visualize is the eval's own Rerun overlay.
+        rr.set_time("navigation_step", sequence=step)
+        rr.log("camera", rr.Image(rgb))
+        method.visualize(obs)
 
         step_velocity(sim, action.linear_velocity, action.angular_velocity)
 
@@ -178,6 +195,22 @@ def main() -> None:
     config["use_geodesic_follower"] = False
     method = LoTISNavigationMethod(config)
     method.setup()
+
+    rr.init("teach_repeat", spawn=True)
+    rr.send_blueprint(
+        rrb.Blueprint(
+            rrb.Horizontal(
+                rrb.Spatial2DView(name="Camera", origin="camera"),
+                rrb.Vertical(
+                    rrb.Spatial2DView(name="Last recorded frame", origin="last_recorded_frame"),
+                    rrb.Spatial2DView(name="Goal", origin="goal"),
+                    rrb.Spatial2DView(name="Closest trajectory frame", origin="closest_trajectory_frame"),
+                ),
+                column_shares=[3, 1],
+            ),
+            collapse_panels=True,
+        )
+    )
 
     scene = args.scene or next(SCENES_DIR.glob(f"{args.index:05d}-*/*.basis.glb"))
     print(f"Loading {scene}")
@@ -212,9 +245,6 @@ def main() -> None:
     print("Navigating...")
     repeat(sim, method, states[0], states[-1], frames[-1])
 
-    print("Press any key to close")
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
     sim.close()
 
 
