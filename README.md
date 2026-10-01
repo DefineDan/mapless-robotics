@@ -12,3 +12,44 @@ An application could be search and rescue. We want to quickly search a place for
 4. **Navigate (Spot / human):** [LoTIS](https://arxiv.org/abs/2602.18803) localizes this reference trajectory in image space from the follower's live camera view and guides it along the path. The follower can be Spot or a person with a phone or smart glasses. This is *cross-embodiment* navigation: the reference is recorded by a drone and followed by a different agent, so camera height and viewpoint differ.
 
 ## Setup
+1. Get the submodules:
+    ```bash
+    git submodule update --init --recursive
+    ```
+2. Install dependencies and create a venv using [uv](https://docs.astral.sh/uv/):
+    ```bash
+    uv sync
+    ```
+
+### Data Setup
+1. Download the HM3D dataset. Refer to the [LoTIS README](external/lotis/README.md).
+
+### LoTIS Setup
+Refer to the [LoTIS README](external/lotis/README.md) for detailed setup instructions.
+1. Get model weights for both LoTIS and DinoV3
+2. Set up the environment variables preferably in a `.env` file, eg:
+    ```bash
+    DINOV3_WEIGHTS=path/to/dinov3_vitb16_pretrain.pth
+    DINOV3_REPO=/path/to/external/dinov3
+    LOTIS_CHECKPOINT=/path/to/final_model.pth
+    LOTIS_CONFIG=/path/to/final_config.yaml
+    ```
+3. Check the LoTIS navigation demo using a pre-recorded trajectory:
+    ```bash
+    cd external/lotis
+    python infer.py \
+        --trajectory /path/to/trajectory.mp4 \
+        --query /path/to/query.mp4
+    ```
+## Running
+
+1. Check if you can run the Habitat simulation and control it with the keyboard:
+```bash
+python -m mapless_robotics.walk --index 10                                               
+```
+2. Configure the LoTIS parameters in [`src/mapless_robotics/configs/lotis_config.yaml`](src/mapless_robotics/configs/lotis_method.yaml) to point to the correct model weights and config files.
+
+3. Demonstrate a trajectory and follow it with LoTIS in the simulator:
+```bash
+python -m mapless_robotics.teach_repeat --index 10
+```
