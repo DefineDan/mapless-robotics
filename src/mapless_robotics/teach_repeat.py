@@ -155,6 +155,7 @@ def repeat(
     fx = (w / 2) / np.tan(np.deg2rad(HFOV) / 2)
     intrinsics = np.array([[fx, 0, w / 2], [0, fx, h / 2], [0, 0, 1]], dtype=np.float32)
 
+    rr.reset_time()
     rr.log("goal", rr.Image(goal_frame), static=True)
     for step in range(MAX_STEPS):
         rgb = sim.get_sensor_observations()["rgb"][:, :, :3]
