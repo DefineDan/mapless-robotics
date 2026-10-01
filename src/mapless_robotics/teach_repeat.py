@@ -33,7 +33,7 @@ from PIL import Image
 
 from mapless_robotics.walk import SCENES_DIR, make_sim
 
-LOTIS_CONFIG = Path("lotis/nav_eval/configs/lotis_method.yaml")
+LOTIS_CONFIG = Path(__file__).parent / "configs" / "lotis_config.yaml"
 DATA_DIR = Path("data/runs")
 
 # Terminal key -> Habitat action (arrow keys arrive as escape sequences)
@@ -188,11 +188,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Load LoTIS first, so there's no wait after recording. Steer from the image only:
-    # the eval's default geodesic follower would use the simulator's navmesh (a map).
+    # Load LoTIS first, so there's no wait after recording
     print("Loading LoTIS...")
     config = yaml.safe_load(LOTIS_CONFIG.read_text())
-    config["use_geodesic_follower"] = False
     method = LoTISNavigationMethod(config)
     method.setup()
 
@@ -202,9 +200,14 @@ def main() -> None:
             rrb.Horizontal(
                 rrb.Spatial2DView(name="Camera", origin="camera"),
                 rrb.Vertical(
-                    rrb.Spatial2DView(name="Last recorded frame", origin="last_recorded_frame"),
+                    rrb.Spatial2DView(
+                        name="Last recorded frame", origin="last_recorded_frame"
+                    ),
                     rrb.Spatial2DView(name="Goal", origin="goal"),
-                    rrb.Spatial2DView(name="Closest trajectory frame", origin="closest_trajectory_frame"),
+                    rrb.Spatial2DView(
+                        name="Closest trajectory frame",
+                        origin="closest_trajectory_frame",
+                    ),
                 ),
                 column_shares=[3, 1],
             ),
