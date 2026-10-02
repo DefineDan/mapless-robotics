@@ -51,7 +51,9 @@ logger = logging.getLogger(__name__)
 ENTER = {10, 13}
 QUIT = {ord("q"), 27}
 NAVIGATE = ord("n")
-GOAL_RADIUS = 0.5  # metres
+GOAL_RADIUS = 1.0  # metres
+ALIGN_TOLERANCE = np.deg2rad(20.0)
+ALIGN_GAIN = 2.0  # angular velocity per radian of heading error, like LoTIS's turn_gain
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -238,6 +240,12 @@ def setup_frontier_navigation(
     return pose
 
 
+def yaw(pose: np.ndarray) -> float:
+    """Heading about Habitat's up axis (Y) of a local-to-world pose."""
+    pose = np.asarray(pose)
+    return float(np.arctan2(pose[0, 2], pose[2, 2]))
+
+
 def drive(
     sim: Simulator,
     agent: Agent,
@@ -253,13 +261,19 @@ def drive(
     turned: Turned,
     frames: list[np.ndarray] | None = None,
     states: list[AgentState] | None = None,
+    goal_yaw: float | None = None,
+    turn_around: bool = False,
 ) -> bool:
     """Let LoTIS drive towards goal_position. Returns False if q/Escape stopped it.
 
+    With turn_around, first turn 180 degrees in place so the route back is in view.
+    With goal_yaw, turn in place on arrival until facing that heading.
     With frames and states, keep recording the route as during manual exploration.
     """
     intrinsics = None
     distance = np.inf
+    arrived = False
+    target_yaw = None  # while set, turn in place towards it instead of using LoTIS
     for step in range(max_steps):
         observation = capture(sim, agent)
         rgb = observation.rgb
@@ -273,19 +287,37 @@ def drive(
         poll_analysis(worker, graph, view, graph_output)
         if frames is not None:
             record_frame(observation, agent.get_state(), frames, states, view, turned)
-        action = method.act(policy_obs)
-        method.visualize(policy_obs)
+        if turn_around and step == 0:
+            target_yaw = yaw(observation.robot_pose) + np.pi
+        if target_yaw is None:
+            action = method.act(policy_obs)
+            method.visualize(policy_obs)
         key = keyboard.poll(0)
         if key in QUIT:
             print("Navigation stopped")
             return False
         frame_index = len(frames) - 1 if frames else None
         offer_capture(worker, observation, key, graph, graph_output, frame_index)
+        if target_yaw is not None:
+            error = target_yaw - yaw(observation.robot_pose)
+            error = float(np.arctan2(np.sin(error), np.cos(error)))
+            if abs(error) >= ALIGN_TOLERANCE:
+                step_velocity(sim, 0.0, float(np.clip(ALIGN_GAIN * error, -1.0, 1.0)))
+                continue
+            target_yaw = None
+            if arrived:
+                print("Facing the original view")
+                return True
+            print("Turned around; LoTIS takes over")
+            continue
         step_velocity(sim, action.linear_velocity, action.angular_velocity)
         distance = float(np.linalg.norm(agent.get_state().position - goal_position))
-        if distance < GOAL_RADIUS:
+        if distance < GOAL_RADIUS: # TODO: use lotis to determine when we arrived
             print(f"Reached the goal in {step + 1} steps")
-            return True
+            if goal_yaw is None:
+                return True
+            arrived = True
+            target_yaw = goal_yaw
     print(f"Stopped after {max_steps} steps, {distance:.2f} m from the goal")
     return True
 
@@ -318,7 +350,7 @@ def navigate_to_frontier(
     drive(
         sim, agent, method, np.asarray(pose.pose)[:3, 3], worker, graph,
         graph_output, view, keyboard, max_steps, step_velocity, turned,
-        frames, states,
+        frames, states, goal_yaw=yaw(pose.pose), turn_around=True,
     )
     print("Back to manual exploration")
 
