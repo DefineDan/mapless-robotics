@@ -41,3 +41,26 @@ class TerminalKeyboard:
                 key += os.read(self.fd, 1)
             return ARROW_CODES.get(key, 27)
         return key[0]
+
+    def read_line(self, prompt):
+        """Block for a typed line; Enter submits, Escape cancels (returns None)."""
+        # cbreak mode disables echo, so echo the typed characters ourselves.
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        text = ""
+        while True:
+            key = os.read(self.fd, 1)
+            if key in (b"\n", b"\r"):
+                print()
+                return text
+            if key == b"\x1b":
+                print()
+                return None
+            if key in (b"\x7f", b"\x08"):
+                if text:
+                    text = text[:-1]
+                    sys.stdout.write("\b \b")
+            elif key.isascii() and key.decode().isprintable():
+                text += key.decode()
+                sys.stdout.write(key.decode())
+            sys.stdout.flush()

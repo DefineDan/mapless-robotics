@@ -258,18 +258,21 @@ camera, Enter finishes recording and begins automatic navigation, Q quits during
 recording, and Ctrl+C interrupts navigation. Rerun shows the images and predictions;
 recorded frames are saved under `data/runs/`.
 
-## Teach, explore, and repeat in Rerun
+## Explore and navigate in Rerun
 
-`teach_repeat_frontiers.py` combines the two workflows. Drive a route while
+`explore_navigate.py` combines the two workflows. Drive a route while
 OpenFrontier builds the graph, then press Enter to reset the robot to the start
-and let LoTIS repeat the route. Frontier analysis continues during the repeat.
+and let LoTIS navigate to where exploration ended. While exploring, press `n`
+and type a frontier id (the `F<id>` labels in the 3D graph) to let LoTIS drive
+back to the pose that saw that frontier, along the frames recorded since then.
+Frontier analysis continues while LoTIS drives.
 Use the terminal for controls; Rerun displays the live camera with LoTIS's
 trajectory points, the marked frontier image, and the 3D graph.
 
 From `mapless-robotics/` with the project environment activated:
 
 ```bash
-PYTHONPATH=src python -m mapless_robotics.teach_repeat_frontiers \
+PYTHONPATH=src python -m mapless_robotics.explore_navigate \
   --scene ../openfrontier/examples/mv2HUxq3B53.glb \
   --frontier-weights ../openfrontier/model_weights/rgbd_11cls.pth \
   --dinov3-weights models/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth \
@@ -277,9 +280,35 @@ PYTHONPATH=src python -m mapless_robotics.teach_repeat_frontiers \
 ```
 
 Press `f` to detect frontiers, arrows to move, A/D to turn, W/S to tilt the
-camera, `g` to save, Enter to start repeating, and Q/Escape to quit. Choose
+camera, `g` to save, `n` to navigate to a frontier (Q/Escape stops that drive
+and returns to manual control), Enter to start navigating to the end, and
+Q/Escape to quit. Choose
 `--exploration periodic --interval 1` or `--exploration movement` for automatic
 frontier captures. The route frames and graph are saved together under
-`runs/teach_repeat_frontiers/<timestamp>/`; `--run-dir` and `--graph-output`
+`runs/explore_navigate/<timestamp>/`; `--run-dir` and `--graph-output`
 override those paths. Habitat is initialized before LoTIS to avoid the LLVM
 collision seen when both are loaded in the opposite order.
+
+
+
+
+python -m mapless_robotics.explore_navigate \
+  --index 10 \
+  --scenes-dir /Users/dan/Code/kth/mapless-robotics/data/versioned_data/hm3d-0.2/hm3d/train \
+  --exploration manual --depth-source habitat \
+  --lotis-config /Users/dan/Code/kth/kth-mapless-robotics/src/mapless_robotics/configs/lotis_config.yaml \
+  --checkpoint /Users/dan/Code/kth/mapless-robotics/models/lotis/final_model.pth \
+  --model-config /Users/dan/Code/kth/mapless-robotics/models/lotis/final_config.yaml
+
+
+python -m mapless_robotics.teach_repeat --index 10 --checkpoint /Users/dan/Code/kth/mapless-robotics/models/lotis/final_model.pth --lotis-config /Users/dan/Code/kth/kth-mapless-robotics/src/mapless_robotics/configs/lotis_config.yaml
+
+
+python -m mapless_robotics.walk_frontiers --index 10 --scenes-dir /Users/dan/Code/kth/mapless-robotics/data/versioned_data/hm3d-0.2/hm3d/train --viewer rerun
+
+
+Alright got it. Now let's advance. The idea is the following. 
+
+We have our exploration graph and we want to use that to navigate during the exploration phase (called teach phase right now). Maybe lets rename it. We have an expolartion phase and then a navigation / retrieval phase (where we just go to the goal called repeat right now). Well the main idea is that I want to use lotis to navigate during expolration as well. Here is how it should work:
+
+Based on the exploration graph we have for each frontier node Pose nodes that are connected to it. 

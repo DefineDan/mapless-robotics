@@ -24,6 +24,7 @@ class PoseNode:
     timestamp: float
     distance: float
     camera_pose: list | None = None
+    frame_index: int | None = None  # recorded trajectory frame taken at this pose
 
 
 @dataclass
@@ -48,7 +49,9 @@ class ExplorationGraph:
         self.poses: dict[int, PoseNode] = {}
         self.frontiers: dict[int, FrontierNode] = {}
 
-    def add_pose(self, node_id, pose, parent_id, timestamp, camera_pose=None):
+    def add_pose(
+        self, node_id, pose, parent_id, timestamp, camera_pose=None, frame_index=None
+    ):
         if node_id in self.poses:
             raise ValueError(f"Pose ID {node_id} already exists")
         if parent_id is not None and parent_id not in self.poses:
@@ -62,7 +65,13 @@ class ExplorationGraph:
             parent = np.asarray(self.poses[parent_id].pose)
             distance = float(np.linalg.norm(pose[:3, 3] - parent[:3, 3]))
         node = PoseNode(
-            node_id, pose.tolist(), parent_id, float(timestamp), distance, camera_pose
+            node_id,
+            pose.tolist(),
+            parent_id,
+            float(timestamp),
+            distance,
+            camera_pose,
+            frame_index,
         )
         self.poses[node_id] = node
         return node
@@ -97,11 +106,15 @@ class ExplorationGraph:
         )
         return nearest.id
 
-    def add_frontiers_graph(self, frontiers, robot_pose, timestamp, camera_pose=None):
+    def add_frontiers_graph(
+        self, frontiers, robot_pose, timestamp, camera_pose=None, frame_index=None
+    ):
         """Append a capture and link it to the last processed capture."""
         parent_id = next(reversed(self.poses), None)
         pose_id = max(self.poses, default=-1) + 1
-        self.add_pose(pose_id, robot_pose, parent_id, timestamp, camera_pose)
+        self.add_pose(
+            pose_id, robot_pose, parent_id, timestamp, camera_pose, frame_index
+        )
         for frontier in frontiers if frontiers is not None else []:
             # Invalid network predictions must not poison spatial matching/JSON.
             position = np.asarray(frontier.pos3d, dtype=float)
@@ -146,6 +159,7 @@ class ExplorationGraph:
                 node["parent_id"],
                 node["timestamp"],
                 node["camera_pose"],
+                node.get("frame_index"),
             )
         graph.frontiers = {
             node["id"]: FrontierNode(**node) for node in data["frontiers"]
