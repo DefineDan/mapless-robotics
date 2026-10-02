@@ -27,13 +27,13 @@ An application could be search and rescue. We want to quickly search a place for
 ### LoTIS Setup
 Refer to the [LoTIS README](external/lotis/README.md) for detailed setup instructions.
 1. Get model weights for both LoTIS and DinoV3
-2. Set up the environment variables preferably in a `.env` file, eg:
+2. Set the DINOv3 paths in your shell, or pass `--dinov3-weights` to the scripts:
     ```bash
-    DINOV3_WEIGHTS=path/to/dinov3_vitb16_pretrain.pth
-    DINOV3_REPO=/path/to/external/dinov3
-    LOTIS_CHECKPOINT=/path/to/final_model.pth
-    LOTIS_CONFIG=/path/to/final_config.yaml
+    export DINOV3_WEIGHTS=/path/to/dinov3_vitb16_pretrain.pth
+    export DINOV3_REPO=/path/to/external/dinov3
     ```
+   The default LoTIS checkpoint and architecture config are in `external/lotis/`.
+   Use `--checkpoint`, `--model-config`, or `--lotis-config` to override them.
 3. Check the LoTIS navigation demo using a pre-recorded trajectory:
     ```bash
     cd external/lotis
@@ -47,7 +47,9 @@ Refer to the [LoTIS README](external/lotis/README.md) for detailed setup instruc
 ```bash
 python -m mapless_robotics.walk --index 10                                               
 ```
-2. Configure the LoTIS parameters in [`src/mapless_robotics/configs/lotis_config.yaml`](src/mapless_robotics/configs/lotis_method.yaml) to point to the correct model weights and config files.
+2. The scripts load LoTIS settings from
+   [`external/lotis/nav_eval/configs/lotis_method.yaml`](external/lotis/nav_eval/configs/lotis_method.yaml)
+   by default. Pass `--lotis-config` to use another method configuration.
 
 3. Demonstrate a trajectory and follow it with LoTIS in the simulator:
 ```bash
