@@ -2,6 +2,7 @@
 models/
 data/
 scene_datasets/
+*.png
 
 # habitat collection
 src/test_habitat/runs
@@ -226,3 +227,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Exploration graph snapshots
+runs

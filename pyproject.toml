@@ -6,7 +6,25 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "habitat-sim",
+    "hdbscan>=0.8.44",
     "lotis",
+    "rerun-sdk>=0.38,<0.39",
+    "segmentation-models-pytorch==0.3.3",
+    "setuptools<81",
+    # OpenFrontier (external/OpenFrontier/requirements.txt)
+    "torch",
+    "torchvision",
+    "transformers",
+    "open3d==0.19.0",
+    "opencv-python",
+    "tqdm",
+    "pillow",
+    "gdown",
+    "albumentations==2.0.6",
+    "google-genai",
+    "pywavemap",
+    "ompl==1.7.0",
+    "unik3d",
 ]
 
 [project.scripts]
@@ -16,6 +34,23 @@ mapless-robotics = "mapless_robotics:main"
 requires = ["uv_build>=0.7.10,<0.8"]
 build-backend = "uv_build"
 
+[tool.uv]
+# UniK3D lists these, but its inference path doesn't import them and they have no macOS wheels.
+override-dependencies = [
+    "triton>=2.4.0; sys_platform == 'linux'",
+    "xformers>=0.0.26; sys_platform == 'linux'",
+]
+# wavemap fetches glog, whose CMakeLists is too old for CMake >= 4. Its fetched Eigen also
+# registers itself in ~/.cmake/packages, which breaks rebuilds after a failed build.
+# Clang >= 19 rejects wavemap's `.template emplace_front(...)` without the -Wno flag.
+[tool.uv.config-settings-package.pywavemap]
+"cmake.define.CMAKE_POLICY_VERSION_MINIMUM" = "3.5"
+"cmake.define.CMAKE_EXPORT_NO_PACKAGE_REGISTRY" = "ON"
+"cmake.define.CMAKE_FIND_USE_PACKAGE_REGISTRY" = "OFF"
+"cmake.define.CMAKE_CXX_FLAGS" = "-Wno-missing-template-arg-list-after-template-kw"
+
 [tool.uv.sources]
 lotis = { path = "external/lotis", editable = true }
 habitat-sim = { git = "https://github.com/facebookresearch/habitat-sim.git", rev = "57ee4941dc4765240f0f91f70b2c97a919bf9038" }
+unik3d = { path = "external/OpenFrontier/third_party/UniK3D", editable = true }
+pywavemap = { git = "https://github.com/ethz-asl/wavemap", subdirectory = "library/python" }
