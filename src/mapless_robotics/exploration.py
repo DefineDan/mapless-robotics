@@ -137,16 +137,17 @@ class ExplorationWorker:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="frontier")
         self.future = None
         self.observation = None
+        self.frame_index = None
         self.last_result = None
 
     @property
     def busy(self):
         return self.future is not None
 
-    def submit(self, observation, now, manual=False):
+    def submit(self, observation, now, manual=False, frame_index=None):
         if self.busy or not self.trigger.due(observation, now, manual):
             return False
-        self.observation = observation
+        self.observation, self.frame_index = observation, frame_index
         self.future = self.executor.submit(
             self.pipeline.process_with_visualization, observation
         )
@@ -156,14 +157,17 @@ class ExplorationWorker:
     def poll(self):
         if self.future is None or not self.future.done():
             return None
-        future, observation = self.future, self.observation
-        self.future = self.observation = None
+        future, observation, frame_index = (
+            self.future, self.observation, self.frame_index
+        )
+        self.future = self.observation = self.frame_index = None
         result = future.result()  # Caller reports errors; no partial pose.
         pose_id = self.graph.add_frontiers_graph(
             result.frontiers,
             observation.robot_pose,
             observation.timestamp,
             observation.camera_pose,
+            frame_index,
         )
         self.last_result = result
         return pose_id
