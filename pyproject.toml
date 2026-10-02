@@ -6,7 +6,11 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "habitat-sim",
+    "hdbscan>=0.8.44",
     "lotis",
+    "rerun-sdk>=0.38,<0.39",
+    "segmentation-models-pytorch==0.3.3",
+    "setuptools<81",
 ]
 
 [project.scripts]
