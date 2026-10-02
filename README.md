@@ -20,6 +20,10 @@ An application could be search and rescue. We want to quickly search a place for
     ```bash
     uv sync
     ```
+   This also installs OpenFrontier's dependencies (including UniK3D and pywavemap,
+   which are built from source). It needs a recent uv: 0.7.x can't parse the
+   `config-settings-package` section in `pyproject.toml`, so run `brew upgrade uv` or
+   `uv self update` first if needed.
 
 ### Data Setup
 1. Download the HM3D dataset. Refer to the [LoTIS README](external/lotis/README.md).
@@ -59,36 +63,25 @@ python -m mapless_robotics.teach_repeat --index 10
 
 ## Openfrontier
 
-### Instalation
-```bash
-uv venv --python 3.12 .venv_open_fron
-source .venv_open_fron/bin/activate
-export CMAKE_POLICY_VERSION_MINIMUM=3.5
-cd external/OpenFrontier/
-uv pip install -r requirements.txt
-bash scripts/download_weights.sh
+### Setup
+The Python dependencies come with `uv sync` (see [Setup](#setup)). There's no
+separate environment and no `pip install -r requirements.txt`. You only need the
+model weights:
 
-git submodule update --init third_party/UniK3D
-uv pip install -e third_party/UniK3D
-uv pip install "setuptools<81"
+```bash
+cd external/OpenFrontier
+bash scripts/download_weights.sh
+cd ../..
 ```
+
+The UniK3D depth model downloads from Hugging Face on first use.
+
 ## Frontier exploration and graph generation
 
-Run from `mapless-robotics/` with an environment containing Habitat-Sim,
-OpenCV with GUI support, NumPy, PyYAML, PyTorch, and OpenFrontier's inference
-dependencies in **the same environment**. The project now declares OpenFrontier's
-runtime dependencies in `pyproject.toml` and `uv.lock`. For an existing `.venv`
-with working Habitat and PyTorch, install the missing inference packages without
-rebuilding Habitat:
-
-```bash
-uv pip install --python .venv/bin/python 'hdbscan>=0.8.44' \
-  'segmentation-models-pytorch==0.3.3' 'setuptools<81'
-source .venv/bin/activate
-```
-
-This is sufficient for `--depth-source habitat`; UniK3D is only required for
-`--depth-source estimated`. Use `PYTHONPATH=src` if this project is not installed.
+Run from `mapless-robotics/` with the project environment activated
+(`source .venv/bin/activate`, or prefix the commands with `uv run`).
+`--depth-source habitat` uses simulator depth; `--depth-source estimated` uses
+UniK3D. `uv sync` installs the project itself, so `PYTHONPATH=src` is optional.
 The default checkpoint is `external/OpenFrontier/model_weights/rgbd_11cls.pth`;
 use `--frontier-weights /path/to/rgbd_11cls.pth` for a checkpoint elsewhere.
 The default detector settings come from OpenFrontier's `config/navigation.yaml`;
@@ -134,8 +127,8 @@ project root, then `scene_datasets/hm3d/train` under the project root and the
 versioned data path under `external/habitat-sim`. Missing indices report the
 searched paths; they never silently select a different scene. If a scene has no
 navmesh, one is built in memory.
-Estimated depth requires UniK3D (`uv pip install -e external/OpenFrontier/third_party/UniK3D`)
-and its model weights; the first use may download the pretrained model.
+Estimated depth uses UniK3D (installed by `uv sync`); the first use downloads
+the pretrained model.
 `--depth-model` selects the UniK3D model. Habitat depth bypasses UniK3D while
 still running the real OpenFrontier detector. Manual analysis is the default;
 estimated depth is the default depth source.
