@@ -12,11 +12,10 @@ q = quit (Ctrl+C during navigation).
 """
 
 import argparse
-import os
 import sys
 import termios
 import tty
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 import habitat_sim
@@ -34,9 +33,7 @@ from PIL import Image
 
 from mapless_robotics.walk import SCENES_DIR, make_sim
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LOTIS_ROOT = PROJECT_ROOT / "external/lotis"
-LOTIS_CONFIG = LOTIS_ROOT / "nav_eval/configs/lotis_method.yaml"
+LOTIS_CONFIG = Path(__file__).parent / "configs" / "lotis_config.yaml"
 DATA_DIR = Path("data/runs")
 
 # Terminal key -> Habitat action (arrow keys arrive as escape sequences)
@@ -158,6 +155,7 @@ def repeat(
     fx = (w / 2) / np.tan(np.deg2rad(HFOV) / 2)
     intrinsics = np.array([[fx, 0, w / 2], [0, fx, h / 2], [0, 0, 1]], dtype=np.float32)
 
+    rr.reset_time()
     rr.log("goal", rr.Image(goal_frame), static=True)
     for step in range(MAX_STEPS):
         rgb = sim.get_sensor_observations()["rgb"][:, :, :3]
@@ -179,79 +177,6 @@ def repeat(
     print(f"Gave up after {MAX_STEPS} steps, {distance:.2f} m from the goal")
 
 
-def load_lotis_config(
-    config_path=LOTIS_CONFIG, *, checkpoint=None, model_config=None, dinov3_weights=None
-):
-    """Resolve the bundled checkout layout or paths relative to a custom YAML.
-
-    CLI paths and environment variables are relative to the working directory.
-    The bundled method YAML uses paths relative to the LoTIS checkout, except
-    its DINOv3 repo, which lives alongside LoTIS under external/.
-    """
-    config_path = Path(config_path).expanduser().resolve()
-    if not config_path.is_file():
-        raise FileNotFoundError(f"LoTIS method config not found: {config_path}")
-    config = yaml.safe_load(config_path.read_text())
-    if not isinstance(config, dict):
-        raise TypeError("LoTIS method config must contain a YAML mapping")
-    bundled = config_path == LOTIS_CONFIG.resolve()
-    base = LOTIS_ROOT if bundled else config_path.parent
-
-    def resolved(value, root):
-        if not isinstance(value, (str, os.PathLike)):
-            raise TypeError(f"Expected a model path, got {value!r}")
-        path = Path(value).expanduser()
-        return str((root / path).resolve())
-
-    for key, override, default in (
-        ("checkpoint_path", checkpoint, "final_model.pth"),
-        ("config_path", model_config, "final_config.yaml"),
-    ):
-        config[key] = resolved(
-            override if override is not None else config.get(key, default),
-            Path.cwd() if override is not None else base,
-        )
-
-    repo_env = os.environ.get("DINOV3_REPO")
-    repo_base = PROJECT_ROOT / "external" if bundled else base
-    config["dinov3_repo"] = resolved(
-        repo_env or config.get("dinov3_repo", "./dinov3"),
-        Path.cwd() if repo_env else repo_base,
-    )
-    weights = (
-        dinov3_weights
-        or config.get("dinov3_weights")
-        or os.environ.get("DINOV3_WEIGHTS")
-    )
-    weights_base = (
-        Path.cwd()
-        if dinov3_weights is not None or not config.get("dinov3_weights")
-        else base
-    )
-    config["dinov3_weights"] = resolved(weights, weights_base) if weights else None
-
-    missing = []
-    for key, label, option in (
-        ("checkpoint_path", "LoTIS checkpoint", "--checkpoint"),
-        ("config_path", "LoTIS model config", "--model-config"),
-        (
-            "dinov3_weights",
-            "DINOv3 ViT-B/16 weights",
-            "--dinov3-weights or DINOV3_WEIGHTS",
-        ),
-    ):
-        if config[key] is None or not Path(config[key]).is_file():
-            missing.append(f"  {label}: {config[key] or 'not configured'} ({option})")
-    if not (Path(config["dinov3_repo"]) / "hubconf.py").is_file():
-        missing.append(f"  DINOv3 repository: {config['dinov3_repo']} (DINOV3_REPO)")
-    if missing:
-        raise FileNotFoundError(
-            "Missing teach-and-repeat model files:\n" + "\n".join(missing)
-        )
-    config["use_geodesic_follower"] = False
-    return config
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -262,45 +187,11 @@ def main() -> None:
     parser.add_argument(
         "--scene", default=None, help="Path to a .glb scene (overrides --index)"
     )
-    parser.add_argument(
-        "--lotis-config",
-        type=Path,
-        default=LOTIS_CONFIG,
-        help="LoTIS navigation-method YAML",
-    )
-    parser.add_argument("--checkpoint", type=Path, help="LoTIS model checkpoint (.pth)")
-    parser.add_argument(
-        "--model-config", type=Path, help="LoTIS model architecture YAML"
-    )
-    parser.add_argument(
-        "--dinov3-weights",
-        type=Path,
-        help="DINOv3 ViT-B/16 checkpoint (or set DINOV3_WEIGHTS)",
-    )
     args = parser.parse_args()
 
-    scene = (
-        Path(args.scene).expanduser()
-        if args.scene
-        else next(
-            (PROJECT_ROOT / SCENES_DIR).glob(f"{args.index:05d}-*/*.basis.glb"), None
-        )
-    )
-    if scene is None or not scene.is_file():
-        parser.error("Scene not found. Supply --scene /path/to/scene.glb.")
-    try:
-        config = load_lotis_config(
-            args.lotis_config,
-            checkpoint=args.checkpoint,
-            model_config=args.model_config,
-            dinov3_weights=args.dinov3_weights,
-        )
-    except (OSError, TypeError, ValueError, yaml.YAMLError) as error:
-        parser.error(str(error))
-
-    # Load LoTIS first, so there's no wait after recording. Steer from the image only:
-    # the eval's default geodesic follower would use the simulator's navmesh (a map).
+    # Load LoTIS first, so there's no wait after recording
     print("Loading LoTIS...")
+    config = yaml.safe_load(LOTIS_CONFIG.read_text())
     method = LoTISNavigationMethod(config)
     method.setup()
 
@@ -325,6 +216,7 @@ def main() -> None:
         )
     )
 
+    scene = args.scene or next(SCENES_DIR.glob(f"{args.index:05d}-*/*.basis.glb"))
     print(f"Loading {scene}")
     sim = make_sim(str(scene))
     agent = sim.initialize_agent(0)
@@ -337,7 +229,7 @@ def main() -> None:
     if len(frames) < 2:
         raise SystemExit("Recorded fewer than 2 frames, walk a bit further next time")
 
-    out_dir = DATA_DIR / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    out_dir = DATA_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir.mkdir(parents=True)
     for i, frame in enumerate(frames):
         Image.fromarray(frame).save(out_dir / f"{i:03d}.png")

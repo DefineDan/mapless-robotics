@@ -1,5 +1,6 @@
 # custom
 models/
+data/
 scene_datasets/
 *.png
 

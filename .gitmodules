@@ -7,6 +7,3 @@
 [submodule "OpenFrontier"]
 	path = external/OpenFrontier
 	url = https://github.com/cvg/OpenFrontier.git
-[submodule "external/habitat-sim"]
-	path = external/habitat-sim
-	url = https://github.com/facebookresearch/habitat-sim.git
