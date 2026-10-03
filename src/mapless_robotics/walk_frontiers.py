@@ -29,6 +29,7 @@ from .exploration.exploration import (
     camera_intrinsics,
 )
 from .exploration.exploration_graph import ExplorationGraph
+from .navigate import DepthNavigation
 from .visualization import OpenCVViewer, RerunView
 
 logger = logging.getLogger(__name__)
@@ -266,6 +267,7 @@ def main() -> None:
         / "graph.json"
     )
     worker = None
+    navigator = DepthNavigation()
     sim = None
     viewer = None
     try:
@@ -305,10 +307,27 @@ def main() -> None:
 
                 if worker:
                     try:
-                        pose_id = worker.poll()
+                        # All the logic of the graph happens on the poll
+                        pose_id, result = worker.poll()
+
+
                         if pose_id is not None:
                             viewer.log_analysis(worker.last_result, pose_id, graph)
                             graph.save(output)
+                            objective = graph.objective_frontier
+                            if objective is not None and result.depth is not None:
+                                navigator.set_data(
+                                    objective.position,
+                                    result.depth,
+                                    result.observation.camera_pose,
+                                )
+                                linear, angular = navigator.get_command()
+                                print(
+                                    "Navigation command: "
+                                    f"linear={linear:.3f} m/s, angular={angular:.3f} rad/s"
+                                )
+                            elif objective is None:
+                                print("Navigation command: no active objective frontier")
                             status = (
                                 f"Pose {pose_id} | {len(graph.frontiers)} frontiers"
                             )

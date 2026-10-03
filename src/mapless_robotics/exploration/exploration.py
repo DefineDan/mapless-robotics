@@ -155,9 +155,9 @@ class ExplorationWorker:
         self.trigger.mark_submitted(observation, now)
         return True
 
-    def poll(self):
+    def poll(self)->tuple[int | None, AnalysisResult | None]:
         if self.future is None or not self.future.done():
-            return None
+            return None, None
         future, observation, frame_index = (
             self.future, self.observation, self.frame_index
         )
@@ -172,7 +172,7 @@ class ExplorationWorker:
             depth=result.depth,
         )
         self.last_result = result
-        return pose_id
+        return pose_id, result
 
     def close(self):
         self.executor.shutdown(wait=True)
