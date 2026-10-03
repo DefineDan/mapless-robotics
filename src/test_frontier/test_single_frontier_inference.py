@@ -14,7 +14,7 @@ sys.path.append(os.path.join(PROJECT_ROOT, "external"))
 sys.path.append(os.path.join(PROJECT_ROOT, "external", "OpenFrontier"))
 
 from external.OpenFrontier.utils.frontier_utils import read_config_yaml
-from src.mapless_robotics.frontier import DepthEstimator, FrontierExtractor
+from mapless_robotics.exploration.frontier import DepthEstimator, FrontierExtractor
 
 
 def main():

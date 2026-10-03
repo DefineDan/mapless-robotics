@@ -15,47 +15,26 @@ from __future__ import annotations
 import argparse
 import logging
 import time
-from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from .exploration import (
+from .exploration.exploration import (
     AnalysisTrigger,
     ExplorationPipeline,
     ExplorationWorker,
     Observation,
     camera_intrinsics,
 )
-from .exploration_graph import ExplorationGraph
-from .graph_view import render_graph
-from .rerun_view import RerunView
-from .terminal_keyboard import TerminalKeyboard
+from .exploration.exploration_graph import ExplorationGraph
+from .visualization import OpenCVViewer, RerunView
 
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCENES_DIR = Path("data/versioned_data/hm3d-0.2/hm3d/train")
-
-# cv2.waitKeyEx codes for the arrow keys (macOS first, then Linux / Windows)
-UP = {63232, 65362, 2490368}
-DOWN = {63233, 65364, 2621440}
-LEFT = {63234, 65361, 2424832}
-RIGHT = {63235, 65363, 2555904}
-QUIT = {ord("q"), 27}
-
-KEY_TO_ACTION = {
-    **dict.fromkeys(UP, "move_forward"),
-    **dict.fromkeys(DOWN, "move_backward"),
-    **dict.fromkeys(LEFT, "move_left"),
-    **dict.fromkeys(RIGHT, "move_right"),
-    ord("a"): "turn_left",
-    ord("d"): "turn_right",
-    ord("w"): "look_up",
-    ord("s"): "look_down",
-}
 
 
 def resolve_scene(scene=None, index=25, scenes_dir=None):
@@ -186,7 +165,7 @@ def build_parser():
         "--viewer",
         choices=["opencv", "rerun"],
         default="opencv",
-        help="Display OpenCV windows or a Rerun viewer (terminal keys)",
+        help="Visualization backend (default: opencv)",
     )
     parser.add_argument("--scene", help="Path to a .glb scene (overrides --index)")
     parser.add_argument(
@@ -245,7 +224,7 @@ def build_parser():
 def make_worker(args, graph, trigger):
     import yaml
 
-    from .frontier import OPENFRONTIER_ROOT, DepthEstimator, FrontierExtractor
+    from .exploration.frontier import OPENFRONTIER_ROOT, DepthEstimator, FrontierExtractor
 
     config_path = args.frontier_config or OPENFRONTIER_ROOT / "config/navigation.yaml"
     config = yaml.safe_load(config_path.read_text())
@@ -314,7 +293,7 @@ def main() -> None:
     )
     worker = None
     sim = None
-    rerun_view = None
+    viewer = None
     try:
         if args.exploration != "off":
             print("Loading frontier perception models...")
@@ -331,84 +310,58 @@ def main() -> None:
             settings.set_defaults()
             if not sim.recompute_navmesh(sim.pathfinder, settings):
                 raise RuntimeError("Could not build a walkable navmesh for this scene.")
+
         agent = sim.initialize_agent(0)
         state = agent.get_state()
         state.position = sim.pathfinder.get_random_navigable_point()
         agent.set_state(state)
-        if args.viewer == "rerun":
-            rerun_view = RerunView()
+        viewer = RerunView() if args.viewer == "rerun" else OpenCVViewer()
         status = "Press f to analyze" if worker else "Exploration off"
+
         print("Arrows move | a/d turn | w/s look | f analyze | g save | q quit")
+
         if worker:
             print(f"Graph snapshots: {output}")
-        keyboard_context = TerminalKeyboard() if rerun_view else nullcontext()
-        with keyboard_context as keyboard:
+
+        with viewer.get_context():
             while True:
+
                 observation = capture(sim, agent)
-                if rerun_view:
-                    rerun_view.start_step()
+                viewer.start_step()
+
                 if worker:
                     try:
                         pose_id = worker.poll()
                         if pose_id is not None:
-                            if rerun_view:
-                                rerun_view.log_analysis(
-                                    worker.last_result, pose_id, graph
-                                )
-                            else:
-                                cv2.imshow(
-                                    "Detected frontiers",
-                                    detection_frame(worker.last_result, pose_id),
-                                )
+                            viewer.log_analysis(worker.last_result, pose_id, graph)
                             graph.save(output)
                             status = (
                                 f"Pose {pose_id} | {len(graph.frontiers)} frontiers"
                             )
-                            if rerun_view:
-                                print(status)
+                            viewer.set_status(status)
+
                     except Exception:
                         # Avoid retrying a broken model on every timer tick.
                         trigger.mode = "manual"
                         status = "Analysis failed; see terminal. Press f to retry."
                         logger.exception("Analysis/save failed")
+
                     worker.submit(observation, time.monotonic())
-                    if not rerun_view:
-                        cv2.imshow(
-                            "Exploration graph",
-                            render_graph(graph, observation.robot_pose),
-                        )
-                if rerun_view:
-                    rerun_view.log_camera(observation, time.monotonic())
-                    key = keyboard.poll()
-                else:
-                    frame = cv2.cvtColor(observation.rgb, cv2.COLOR_RGB2BGR)
-                    message = (
-                        "Analyzing captured frame..."
-                        if worker and worker.busy
-                        else status
-                    )
-                    cv2.putText(
-                        frame,
-                        message,
-                        (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (0, 255, 255),
-                        1,
-                    )
-                    cv2.imshow("Habitat", frame)
-                    key = cv2.waitKeyEx(33)
-                if key in QUIT:
+                viewer.set_status(
+                    "Analyzing captured frame..." if worker and worker.busy else status
+                )
+                viewer.log_camera(observation, time.monotonic(), graph=graph)
+                key = viewer.get_keys()
+                if key == "quit":
                     break
-                if key == ord("f") and worker:
+                if key == "f" and worker:
                     if not worker.submit(observation, time.monotonic(), manual=True):
                         status = "Analysis already running"
-                    elif rerun_view:
-                        print("Analyzing captured frame...")
-                elif key == ord("g") and worker:
+
+                elif key == "g" and worker:
                     graph.save(output)
                     print(f"Saved {output}")
-                action = KEY_TO_ACTION.get(key)
+                action = viewer.get_action(key)
                 if action is not None:
                     sim.step(action)
     finally:
@@ -417,9 +370,9 @@ def main() -> None:
                 print("Finishing pending analysis and saving graph...")
                 try:
                     final_pose_id = worker.close()
-                    if final_pose_id is not None and rerun_view:
-                        rerun_view.start_step()
-                        rerun_view.log_analysis(
+                    if final_pose_id is not None and viewer:
+                        viewer.start_step()
+                        viewer.log_analysis(
                             worker.last_result, final_pose_id, graph
                         )
                 except Exception:

@@ -89,12 +89,12 @@ The default detector settings come from OpenFrontier's `config/navigation.yaml`;
 that file are not used by this pipeline.
 
 For this workspace, a scene and checkpoint are already available in the sibling
-`openfrontier` checkout. From `mapless-robotics/`, run:
+`OpenFrontier` checkout. From `mapless-robotics/`, run:
 
 ```bash
 PYTHONPATH=src python -m mapless_robotics.walk_frontiers \
-  --scene ../openfrontier/examples/mv2HUxq3B53.glb \
-  --frontier-weights ../openfrontier/model_weights/rgbd_11cls.pth \
+  --scene ../OpenFrontier/examples/mv2HUxq3B53.glb \
+  --frontier-weights ../OpenFrontier/model_weights/rgbd_11cls.pth \
   --exploration manual --depth-source habitat
 ```
 
@@ -140,8 +140,8 @@ capture, and a native 3D pose/frontier graph to Rerun:
 
 ```bash
 PYTHONPATH=src python -m mapless_robotics.walk_frontiers \
-  --scene ../openfrontier/examples/mv2HUxq3B53.glb \
-  --frontier-weights ../openfrontier/model_weights/rgbd_11cls.pth \
+  --scene ../OpenFrontier/examples/mv2HUxq3B53.glb \
+  --frontier-weights ../OpenFrontier/model_weights/rgbd_11cls.pth \
   --exploration manual --depth-source habitat --viewer rerun
 ```
 
@@ -243,7 +243,7 @@ original repository format. Point the script to the downloaded file:
 
 ```bash
 PYTHONPATH=src python -m mapless_robotics.teach_repeat \
-  --scene ../openfrontier/examples/mv2HUxq3B53.glb \
+  --scene ../OpenFrontier/examples/mv2HUxq3B53.glb \
   --dinov3-weights /path/to/dinov3_vitb16_pretrain.pth
 ```
 
@@ -273,8 +273,8 @@ From `mapless-robotics/` with the project environment activated:
 
 ```bash
 PYTHONPATH=src python -m mapless_robotics.explore_navigate \
-  --scene ../openfrontier/examples/mv2HUxq3B53.glb \
-  --frontier-weights ../openfrontier/model_weights/rgbd_11cls.pth \
+  --scene ../OpenFrontier/examples/mv2HUxq3B53.glb \
+  --frontier-weights ../OpenFrontier/model_weights/rgbd_11cls.pth \
   --dinov3-weights models/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth \
   --exploration manual --depth-source habitat
 ```

@@ -1,8 +1,12 @@
 """Rerun camera, detector crop, and editable 3D graph visualization."""
 
+from contextlib import contextmanager
+
 import numpy as np
 
 from .frontier_colors import gain_colors, latest_gain
+from ..terminal_keyboard import TerminalKeyboard
+from .keys import action_for_key, key_name
 
 
 class RerunView:
@@ -31,11 +35,31 @@ class RerunView:
         )
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
 
+    @contextmanager
+    def get_context(self):
+        try:
+            with TerminalKeyboard() as keyboard:
+                self._keyboard = keyboard
+                yield self
+        finally:
+            self._keyboard = None
+
+    def get_keys(self):
+        """Read one key event as a shared symbolic key name."""
+        return key_name(self._keyboard.poll())
+
+    @staticmethod
+    def get_action(key):
+        return action_for_key(key)
+
+    def set_status(self, status):
+        self.status = status
+
     def start_step(self):
         self.rr.set_time("frame", sequence=self.step)
         self.step += 1
 
-    def log_camera(self, observation, now, *, force=False):
+    def log_camera(self, observation, now, *, force=False, graph=None):
         if not force and now - self.last_camera_log < 0.1:
             return
         self.last_camera_log = now

@@ -20,14 +20,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 from PIL import Image
 
-from .exploration import (
+from .exploration.exploration import (
     AnalysisTrigger,
     ExplorationWorker,
     Observation,
     camera_intrinsics,
 )
-from .exploration_graph import ExplorationGraph, PoseNode
-from .rerun_view import RerunView
+from .exploration.exploration_graph import ExplorationGraph, PoseNode
+from .visualization.rerun_view import RerunView
 from .terminal_keyboard import TerminalKeyboard
 from .walk_frontiers import (
     KEY_TO_ACTION,
