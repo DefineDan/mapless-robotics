@@ -241,32 +241,6 @@ def make_worker(args, graph, trigger):
     return ExplorationWorker(ExplorationPipeline(extractor, estimator), graph, trigger)
 
 
-def detection_frame(result, pose_id):
-    """Caption a completed capture, keeping labels outside the detector image."""
-    frame = cv2.cvtColor(result.marked_rgb, cv2.COLOR_RGB2BGR)
-    frame = cv2.copyMakeBorder(
-        frame, 48, 0, 0, 0, cv2.BORDER_CONSTANT, value=(35, 35, 35)
-    )
-    captured = datetime.fromtimestamp(result.observation.timestamp, tz=UTC).strftime(
-        "%H:%M:%S UTC"
-    )
-    lines = (
-        f"Pose {pose_id} | {len(result.frontiers)} detections (local labels)",
-        f"Captured {captured} | detector crop",
-    )
-    for index, line in enumerate(lines):
-        cv2.putText(
-            frame,
-            line,
-            (8, 18 + index * 21),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.4,
-            (240, 240, 240),
-            1,
-            cv2.LINE_AA,
-        )
-    return frame
-
 
 def main() -> None:
     parser = build_parser()

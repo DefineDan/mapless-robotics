@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .exploration_graph import pose_matrix
+from .exploration_graph import pose_matrix, ExplorationGraph
 
 
 def camera_intrinsics(width, height, hfov_degrees):
@@ -80,7 +80,7 @@ class ExplorationPipeline:
         )
         return [] if result is None else result
 
-    def process_with_visualization(self, observation):
+    def process_with_visualization(self, observation)->AnalysisResult:
         frontiers = self.process(observation)
         visualize = getattr(self.frontier_extractor, "visualize", None)
         marked = visualize(frontiers) if visualize is not None else observation.rgb
@@ -132,7 +132,7 @@ class AnalysisTrigger:
 class ExplorationWorker:
     """One in-flight capture, no stale inference queue. Graph stays on UI thread."""
 
-    def __init__(self, pipeline, graph, trigger):
+    def __init__(self, pipeline:ExplorationPipeline, graph: ExplorationGraph, trigger: AnalysisTrigger):
         self.pipeline, self.graph, self.trigger = pipeline, graph, trigger
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="frontier")
         self.future = None
@@ -161,7 +161,7 @@ class ExplorationWorker:
             self.future, self.observation, self.frame_index
         )
         self.future = self.observation = self.frame_index = None
-        result = future.result()  # Caller reports errors; no partial pose.
+        result: AnalysisResult = future.result()  # Caller reports errors; no partial pose.
         pose_id = self.graph.add_frontiers_graph(
             result.frontiers,
             observation.robot_pose,

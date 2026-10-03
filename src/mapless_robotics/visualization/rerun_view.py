@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 import numpy as np
 
-from .frontier_colors import gain_colors, latest_gain
+from .frontier_colors import latest_u_gain, u_gain_colors
 from ..terminal_keyboard import TerminalKeyboard
 from .keys import action_for_key, key_name
 
@@ -90,6 +90,18 @@ class RerunView:
                 "world/poses",
                 rr.Points3D(list(poses.values()), colors=[(35, 100, 210)], radii=0.08),
             )
+            pose_directions = [
+                -np.asarray(node.pose, dtype=float)[:3, 2] * 0.4
+                for node in graph.poses.values()
+            ]
+            rr.log(
+                "world/pose_directions",
+                rr.Arrows3D(
+                    origins=list(poses.values()),
+                    vectors=pose_directions,
+                    colors=[(35, 100, 210)],
+                ),
+            )
             edges = [
                 [poses[node.parent_id], poses[node.id]]
                 for node in graph.poses.values()
@@ -102,7 +114,7 @@ class RerunView:
                 )
         if graph.frontiers:
             nodes = list(graph.frontiers.values())
-            colors, _ = gain_colors(nodes)
+            colors, _ = u_gain_colors(nodes)
             rr.log(
                 "world/frontiers",
                 rr.Points3D(
@@ -110,13 +122,33 @@ class RerunView:
                     colors=colors,
                     radii=0.13,
                     labels=[
-                        f"F{node.id} gain {gain:.2f}"
-                        if (gain := latest_gain(node)) is not None
-                        else f"F{node.id} gain ?"
+                        f"F{node.id} u_gain {gain:.2f}"
+                        if (gain := latest_u_gain(node)) is not None
+                        else f"F{node.id} u_gain ?"
                         for node in nodes
                     ],
                 ),
             )
+            frontier_arrows = [
+                (node.position, np.asarray(node.vd, dtype=float))
+                for node in nodes
+                if node.vd is not None
+                and np.asarray(node.vd, dtype=float).shape == (3,)
+                and np.isfinite(node.vd).all()
+                and np.linalg.norm(node.vd) > 0
+            ]
+            if frontier_arrows:
+                rr.log(
+                    "world/frontier_directions",
+                    rr.Arrows3D(
+                        origins=[position for position, _ in frontier_arrows],
+                        vectors=[
+                            direction / np.linalg.norm(direction) * 0.4
+                            for _, direction in frontier_arrows
+                        ],
+                        colors=[(220, 80, 180)],
+                    ),
+                )
             observed_from = [
                 [poses[pose_id], node.position]
                 for node in nodes
