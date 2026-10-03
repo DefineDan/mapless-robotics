@@ -71,6 +71,41 @@ class RerunView:
             "world/robot",
             rr.Arrows3D(origins=[position], vectors=[heading], colors=[(30, 180, 60)]),
         )
+        if graph is not None and graph.ena_map is not None:
+            grid, (map_x, map_z, map_theta) = graph.ena_map.get_map()
+            # GridMap is rendered in 3D as a planar raster. ExplorationMap's
+            # first axis is world X and its second is world Z, so rotate its
+            # local XY image plane onto Habitat's XZ ground plane.
+            height, width = grid.shape
+            occupancy = np.full(grid.shape, -1, dtype=np.int8)
+            occupancy[grid == 255] = 0  # observed/known area
+            rr.log(
+                "world/exploration_map",
+                rr.GridMap(
+                    data=occupancy.tobytes(),
+                    format=rr.components.ImageFormat(
+                        width=width,
+                        height=height,
+                        color_model="L",
+                        channel_datatype="U8",
+                    ),
+                    cell_size=graph.ena_map.resolution,
+                    translation=[map_x, 0.0, map_z],
+                    rotation_axis_angle=rr.components.RotationAxisAngle(
+                        [1.0, 0.0, 0.0], -np.pi / 2
+                    ),
+                    colormap=rr.components.Colormap.RvizMap,
+                    opacity=0.75,
+                ),
+            )
+            rr.log(
+                "world/exploration_map_info",
+                rr.TextDocument(
+                    f"Map origin: x={map_x:.3f} m, z={map_z:.3f} m; "
+                    f"theta={map_theta:.3f} rad; "
+                    f"resolution={graph.ena_map.resolution:.3f} m/cell"
+                ),
+            )
 
     def log_analysis(self, result, pose_id, graph):
         rr = self.rr
@@ -114,21 +149,34 @@ class RerunView:
                 )
         if graph.frontiers:
             nodes = list(graph.frontiers.values())
-            colors, _ = u_gain_colors(nodes)
-            rr.log(
-                "world/frontiers",
-                rr.Points3D(
-                    [node.position for node in nodes],
-                    colors=colors,
-                    radii=0.13,
-                    labels=[
-                        f"F{node.id} u_gain {gain:.2f}"
-                        if (gain := latest_u_gain(node)) is not None
-                        else f"F{node.id} u_gain ?"
-                        for node in nodes
-                    ],
-                ),
-            )
+            for is_objective, entity, objective_color, radius in (
+                (False, "world/frontiers", None, 0.13),
+                (True, "world/objective_frontier", (255, 40, 40), 0.22),
+            ):
+                displayed = [node for node in nodes if node.is_objective == is_objective]
+                if not displayed:
+                    continue
+                colors, _ = u_gain_colors(displayed)
+                if objective_color is not None:
+                    colors = [objective_color] * len(displayed)
+                rr.log(
+                    entity,
+                    rr.Points3D(
+                        [node.position for node in displayed],
+                        colors=colors,
+                        radii=radius,
+                        labels=[
+                            f"OBJECTIVE F{node.id} u_gain {gain:.2f}"
+                            if is_objective and (gain := latest_u_gain(node)) is not None
+                            else f"OBJECTIVE F{node.id} u_gain ?"
+                            if is_objective
+                            else f"F{node.id} u_gain {gain:.2f}"
+                            if (gain := latest_u_gain(node)) is not None
+                            else f"F{node.id} u_gain ?"
+                            for node in displayed
+                        ],
+                    ),
+                )
             frontier_arrows = [
                 (node.position, np.asarray(node.vd, dtype=float))
                 for node in nodes

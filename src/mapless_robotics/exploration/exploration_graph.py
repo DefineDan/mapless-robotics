@@ -6,6 +6,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .exploration_map import ExplorationMap
+
 
 def _json_value(value):
     """Recursively convert numpy values when exporting the graph as JSON."""
@@ -62,6 +64,7 @@ class FrontierNode:
     utility: float | None = None
     parent_ids: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
     pose6d: np.ndarray | None = None
+    is_objective: bool = False
 
     def __post_init__(self):
         self.position = np.asarray(self.position, dtype=float)
@@ -95,6 +98,11 @@ class ExplorationGraph:
         visited_distance=0.5,
         u_gain_reduction_percentage=0.9,
         u_gain_threshold=0.1,
+        enable_occupancy=True,
+        occupancy_ini_depth=0.1,
+        occupancy_end_depth=1.0,
+        occupancy_resolution=0.05,
+        camera_intrinsics=None,
     ):
         if not np.isfinite(merge_distance) or merge_distance < 0:
             raise ValueError("merge_distance must be finite and nonnegative")
@@ -125,8 +133,20 @@ class ExplorationGraph:
         self.visited_distance = float(visited_distance)
         self.u_gain_reduction_percentage = float(u_gain_reduction_percentage)
         self.u_gain_threshold = float(u_gain_threshold)
+        self.enable_occupancy = bool(enable_occupancy)
+        self.ena_map = (
+            ExplorationMap(occupancy_ini_depth, occupancy_end_depth, occupancy_resolution)
+            if self.enable_occupancy else None
+        )
+        # Runtime camera: 640x480 with Habitat's 90 degree horizontal FOV by default.
+        self.camera_intrinsics = (
+            np.asarray(camera_intrinsics, dtype=float)
+            if camera_intrinsics is not None
+            else np.array([[320.0, 0.0, 320.0], [0.0, 320.0, 240.0], [0.0, 0.0, 1.0]])
+        )
         self.poses: dict[int, PoseNode] = {}
         self.frontiers: dict[int, FrontierNode] = {}
+        self.objective_frontier: FrontierNode | None = None
 
     def add_pose(
         self, node_id, pose, parent_id, timestamp, camera_pose=None, frame_index=None
@@ -153,6 +173,9 @@ class ExplorationGraph:
             frame_index,
         )
         self.poses[node_id] = node
+        if self.ena_map is not None:
+            camera_view = camera_pose if camera_pose is not None else pose
+            self.ena_map.add_pose(camera_view, self.camera_intrinsics)
         self._apply_pose_visit(node)
         return node
 
@@ -166,7 +189,10 @@ class ExplorationGraph:
 
         positions = np.asarray([f.position for f in frontiers], dtype=float)
 
-        visited = self.test_visit(robot_position, None, positions)
+        if self.ena_map is not None:
+            visited = self.ena_map.is_occupied(positions[:, self.plane_idx])
+        else:
+            visited = self.test_visit(robot_position, None, positions)
 
         if not np.any(visited):
             return
@@ -188,7 +214,7 @@ class ExplorationGraph:
 
         # Eliminate below threshold
         for frontier in visited_frontiers:
-            if frontier.u_gain < self.u_gain_threshold:
+            if not frontier.is_objective and frontier.u_gain < self.u_gain_threshold:
                 self.eliminate_frontier(frontier.id)
 
     def test_visit(
@@ -290,19 +316,23 @@ class ExplorationGraph:
         ):
             return False
 
-        # Reject a frontier viewpoint already represented by a recorded camera
-        # pose. Camera poses use local -Z as their forward direction.
+        # Reject viewpoints that have already been seen (or are close to an
+        # earlier camera pose when occupancy mapping is disabled).
         if frontier.pose6d is not None:
-            camera_poses = [p.camera_pose for p in self.poses.values() if p.camera_pose is not None]
-            if camera_poses:
-                camera_poses = np.asarray(camera_poses, dtype=float)
-                if np.any(self.test_visit(
-                    frontier.pose6d[:3, 3],
-                    self._camera_forward(frontier.pose6d),
-                    camera_poses[:, :3, 3],
-                    camera_poses[:, :3, :3] @ np.array([0.0, 0.0, -1.0]),
-                )):
+            if self.ena_map is not None:
+                if self.ena_map.is_occupied(frontier.pose6d[[0, 2], 3])[0]:
                     return False
+            else:
+                camera_poses = [p.camera_pose for p in self.poses.values() if p.camera_pose is not None]
+                if camera_poses:
+                    camera_poses = np.asarray(camera_poses, dtype=float)
+                    if np.any(self.test_visit(
+                        frontier.pose6d[:3, 3],
+                        self._camera_forward(frontier.pose6d),
+                        camera_poses[:, :3, 3],
+                        camera_poses[:, :3, :3] @ np.array([0.0, 0.0, -1.0]),
+                    )):
+                        return False
         return True
 
     @staticmethod
@@ -322,6 +352,8 @@ class ExplorationGraph:
     def fuse_nodes(self, nodes):
         """Fuse compatible nodes into the lowest-ID representative."""
         nodes = list(nodes)
+        if any(node.is_objective for node in nodes) and len(nodes) > 1:
+            raise ValueError("Objective frontiers cannot be fused")
         representative = min(nodes, key=lambda node: node.id)
         representative.position = np.mean([node.position for node in nodes], axis=0)
         representative.observations = [
@@ -363,7 +395,10 @@ class ExplorationGraph:
 
     def eliminate_frontier(self, frontier_id):
         """Remove a frontier from the active graph, if present."""
-        return self.frontiers.pop(frontier_id, None)
+        frontier = self.frontiers.pop(frontier_id, None)
+        if frontier is self.objective_frontier:
+            self.objective_frontier = None
+        return frontier
 
     def add_frontier(self, frontier, pose_id):
         """Consume OpenFrontier's world-frame ``pos3d``; return its graph ID."""
@@ -379,6 +414,9 @@ class ExplorationGraph:
 
         matches = []
         for existing in self.frontiers.values():
+            # Keep the objective identity and target stable until it is evaluated.
+            if existing.is_objective or node.is_objective:
+                continue
             distance, angle = self.calculate_metric_fusion(node, existing)
             if distance <= self.merge_distance and angle <= self.fusion_angle_degrees:
                 matches.append(existing)
@@ -386,6 +424,94 @@ class ExplorationGraph:
             node = self.fuse_nodes([node, *matches])
         self.frontiers[node.id] = node
         return node.id
+
+    @staticmethod
+    def _position_from_pose(pose):
+        if isinstance(pose, PoseNode):
+            pose = pose.pose
+        pose = np.asarray(pose, dtype=float)
+        if pose.shape == (4, 4):
+            return pose[:3, 3]
+        if pose.shape == (3,):
+            return pose
+        raise ValueError("pose must be a PoseNode, 4x4 matrix, or xyz vector")
+
+    def select_frontier(self, pose):
+        """Mark and return the best frontier, balancing utility and travel distance."""
+        if not self.frontiers:
+            return None
+
+        position = self._position_from_pose(pose)
+
+        ids = list(self.frontiers.keys())
+        frontiers = list(self.frontiers.values())
+
+        # Stack frontier positions: (N, 3)
+        positions = np.stack([f.position for f in frontiers])
+
+        # u_gain takes precedence over gain
+        gains = np.asarray([
+            f.u_gain if f.u_gain is not None else f.gain
+            for f in frontiers
+        ], dtype=float)
+
+        # Valid candidates
+        valid = np.isfinite(gains) & (gains >= 0)
+
+        if not np.any(valid):
+            return None
+
+        # Distances in the selected plane
+        deltas = positions[:, self.plane_idx] - position[self.plane_idx]
+        distances = np.linalg.norm(deltas, axis=1)
+
+        # Score = gain / (1 + distance)
+        scores = gains / (1.0 + distances)
+
+        # Ignore invalid candidates
+        scores[~valid] = -np.inf
+
+        # np.argmax gives the first maximum, matching the deterministic behavior
+        # of max() when scores and distances are tied.
+        selected_idx = np.argmax(scores)
+        selected = frontiers[selected_idx]
+        selected.is_objective = True
+        self.objective_frontier = selected
+
+        return selected
+
+    def eval_objective(self, pose, look_ahead_vector):
+        """Return the active objective, replacing it when reached.
+
+        Reaching requires being within ``visited_distance`` and facing the
+        objective within ``fusion_angle_degrees``. On arrival the old target is
+        removed, then the next target is selected; ``None`` means no target is
+        available (or no valid look-ahead direction was provided).
+        """
+        objective = self.objective_frontier
+        if objective is None:
+            return self.select_frontier(pose)
+
+        position = self._position_from_pose(pose)
+        to_goal = (objective.position - position)[self.plane_idx]
+        distance = float(np.linalg.norm(to_goal))
+        direction = np.asarray(look_ahead_vector, dtype=float)
+        if direction.shape == (4, 4):
+            direction = self._camera_forward(direction)
+        if direction.shape == (3,):
+            direction = direction[self.plane_idx]
+        elif direction.shape != (2,):
+            raise ValueError("look_ahead_vector must have 2 or 3 components, or be a 4x4 pose")
+        direction_norm = float(np.linalg.norm(direction))
+        goal_norm = distance
+        if direction_norm == 0 or goal_norm == 0 or not np.isfinite(direction).all():
+            return objective
+        cosine = float(np.clip(np.dot(direction, to_goal) / (direction_norm * goal_norm), -1.0, 1.0))
+        angle = float(np.degrees(np.arccos(cosine)))
+        if distance <= self.visited_distance and angle <= self.fusion_angle_degrees:
+            self.eliminate_frontier(objective.id)
+            return self.select_frontier(position)
+        return objective
 
     def add_frontiers_graph(
         self, frontiers, robot_pose, timestamp, camera_pose=None, frame_index=None
@@ -401,6 +527,10 @@ class ExplorationGraph:
             position = np.asarray(frontier.pos3d, dtype=float)
             if position.shape == (3,) and np.isfinite(position).all():
                 self.add_frontier(frontier, pose_id)
+        self.eval_objective(
+            robot_pose,
+            camera_pose if camera_pose is not None else robot_pose,
+        )
         return pose_id
 
     # Names used in the architecture discussion.
@@ -457,4 +587,12 @@ class ExplorationGraph:
         graph.frontiers = {
             node["id"]: FrontierNode(**node) for node in data["frontiers"]
         }
+        graph.objective_frontier = next(
+            (
+                frontier
+                for frontier in graph.frontiers.values()
+                if frontier.is_objective
+            ),
+            None,
+        )
         return graph

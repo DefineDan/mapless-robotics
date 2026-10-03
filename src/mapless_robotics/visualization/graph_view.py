@@ -53,7 +53,11 @@ def render_graph(graph, robot_pose=None, size=700):
     colors, gain_range = u_gain_colors(frontier_nodes)
     for node, rgb_color in zip(frontier_nodes, colors):
         p = pixel(node.position)
-        cv2.circle(image, p, 6, rgb_color[::-1], -1)
+        if node.is_objective:
+            cv2.circle(image, p, 10, (0, 0, 255), 2)
+            cv2.drawMarker(image, p, (0, 0, 255), cv2.MARKER_STAR, 16, 2)
+        else:
+            cv2.circle(image, p, 6, rgb_color[::-1], -1)
         if node.vd is not None:
             direction = np.asarray(node.vd, dtype=float)
             if direction.shape == (3,) and np.isfinite(direction).all():
@@ -69,7 +73,11 @@ def render_graph(graph, robot_pose=None, size=700):
                     )
         gain = latest_u_gain(node)
         label = (
-            f"F{node.id} u:{gain:.2f}"
+            f"OBJECTIVE F{node.id} u:{gain:.2f}"
+            if node.is_objective and gain is not None
+            else f"OBJECTIVE F{node.id} u:?"
+            if node.is_objective
+            else f"F{node.id} u:{gain:.2f}"
             if gain is not None
             else f"F{node.id} u:?"
         )
@@ -79,7 +87,7 @@ def render_graph(graph, robot_pose=None, size=700):
             (p[0] + 8, p[1]),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.4,
-            (50, 50, 50),
+            (0, 0, 200) if node.is_objective else (50, 50, 50),
             1,
         )
     if robot_pose is not None:
@@ -94,7 +102,7 @@ def render_graph(graph, robot_pose=None, size=700):
         )
     lines = [
         f"Poses: {len(poses)}  Frontiers: {len(frontiers)}",
-        "Blue: poses  Green: robot  Gray frontier: gain unavailable",
+        "Blue: poses  Green: robot  Red star: objective frontier",
         (
             f"u_gain: purple {gain_range[0]:.2f} -> yellow {gain_range[1]:.2f}"
             if gain_range is not None

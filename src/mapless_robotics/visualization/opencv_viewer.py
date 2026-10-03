@@ -40,6 +40,9 @@ class OpenCVViewer:
         cv2.imshow("Habitat", frame)
         if graph is not None:
             cv2.imshow("Exploration graph", render_graph(graph, observation.robot_pose))
+            if graph.ena_map is not None:
+                grid, _map_pose = graph.ena_map.get_map()
+                cv2.imshow("Exploration map", render_map(grid, graph.ena_map.resolution))
 
     def log_analysis(self, result, pose_id, graph):
         frame = cv2.cvtColor(result.marked_rgb, cv2.COLOR_RGB2BGR)
@@ -68,3 +71,15 @@ class OpenCVViewer:
 
     def set_status(self, status):
         self.status = status
+
+
+def render_map(grid, resolution):
+    """Render seen cells as a readable top-down grayscale OpenCV image."""
+    image = cv2.cvtColor(grid, cv2.COLOR_GRAY2BGR)
+    # Scale small grids for convenient inspection while keeping large maps usable.
+    scale = min(4.0, max(1.0, 600.0 / max(image.shape[:2])))
+    if scale != 1.0:
+        image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    cv2.putText(image, f"{resolution:.3f} m/cell", (8, 20), cv2.FONT_HERSHEY_SIMPLEX,
+                0.5, (0, 255, 255), 1, cv2.LINE_AA)
+    return image
