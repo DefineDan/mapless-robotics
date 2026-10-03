@@ -103,6 +103,8 @@ class ExplorationGraph:
         occupancy_end_depth=1.0,
         occupancy_resolution=0.05,
         camera_intrinsics=None,
+        val_depth_width=10,
+        depth_validity_threshold=0.5,
     ):
         if not np.isfinite(merge_distance) or merge_distance < 0:
             raise ValueError("merge_distance must be finite and nonnegative")
@@ -133,6 +135,13 @@ class ExplorationGraph:
         self.visited_distance = float(visited_distance)
         self.u_gain_reduction_percentage = float(u_gain_reduction_percentage)
         self.u_gain_threshold = float(u_gain_threshold)
+        if val_depth_width < 1:
+            raise ValueError("val_depth_width must be positive")
+        if not np.isfinite(depth_validity_threshold) or depth_validity_threshold < 0:
+            raise ValueError("depth_validity_threshold must be finite and nonnegative")
+        self.val_depth_width = int(val_depth_width)
+        self.depth_validity_threshold = float(depth_validity_threshold)
+        self._depth_images: dict[int, np.ndarray] = {}
         self.enable_occupancy = bool(enable_occupancy)
         self.ena_map = (
             ExplorationMap(occupancy_ini_depth, occupancy_end_depth, occupancy_resolution)
@@ -296,7 +305,7 @@ class ExplorationGraph:
         return node
 
     def is_frontier_valid(self, frontier, pose_id):
-        """Apply minimum-gain, parent-distance, and view-direction filters."""
+        """Apply gain, distance, depth-occlusion, and view-direction filters."""
         if not frontier.valid_flag:
             return False
         gain = frontier.u_gain if frontier.u_gain is not None else frontier.gain
@@ -307,6 +316,8 @@ class ExplorationGraph:
         dist_parent = np.linalg.norm(frontier.position - parent_position)
         if dist_parent > self.maximum_parent_distance:
             return False
+
+
 
         if self.max_vectical_vec is not None and (
             frontier.vd is None
@@ -333,6 +344,33 @@ class ExplorationGraph:
                         camera_poses[:, :3, :3] @ np.array([0.0, 0.0, -1.0]),
                     )):
                         return False
+
+        # depth = self._depth_images.get(pose_id)
+        # pixel = frontier.pixel_pos
+        # camera_pose = self.poses[pose_id].camera_pose
+        # if depth is not None and pixel is not None and camera_pose is not None:
+        #     depth = np.asarray(depth, dtype=float)
+        #     if depth.ndim == 2 and pixel.shape == (2,) and np.isfinite(pixel).all():
+        #         height, width = depth.shape
+        #         # OpenFrontier reports normalized (x, y) coordinates.
+        #         x = int(np.clip(round(float(pixel[0]) * width), 0, width - 1))
+        #         y = int(np.clip(round(float(pixel[1]) * height), 0, height - 1))
+        #         half_width = self.val_depth_width // 2
+        #         x0 = max(0, x - half_width)
+        #         x1 = min(width, x + self.val_depth_width - half_width)
+        #         nearby_depth = depth[y, x0:x1]
+        #         nearby_depth = nearby_depth[np.isfinite(nearby_depth) & (nearby_depth > 0)]
+        #         if nearby_depth.size:
+        #             camera_position = np.asarray(camera_pose, dtype=float)[:3, 3]
+        #             camera_rotation = np.asarray(camera_pose, dtype=float)[:3, :3]
+        #             frontier_camera_position = camera_rotation.T @ (
+        #                 frontier.position - camera_position
+        #             )
+        #             frontier_depth = -float(frontier_camera_position[2])
+        #             if frontier_depth - float(np.min(nearby_depth)) > self.depth_validity_threshold:
+        #                 print(f'It would be occluded, frontier depth: {frontier_depth}, min nearby depth: {np.min(nearby_depth)}')
+        #                 # return False
+
         return True
 
     @staticmethod
@@ -514,7 +552,8 @@ class ExplorationGraph:
         return objective
 
     def add_frontiers_graph(
-        self, frontiers, robot_pose, timestamp, camera_pose=None, frame_index=None
+        self, frontiers, robot_pose, timestamp, camera_pose=None, frame_index=None,
+        depth=None,
     ):
         """Append a capture and link it to the last processed capture."""
         parent_id = next(reversed(self.poses), None)
@@ -522,6 +561,11 @@ class ExplorationGraph:
         self.add_pose(
             pose_id, robot_pose, parent_id, timestamp, camera_pose, frame_index
         )
+        if depth is not None:
+            depth_image = np.array(depth, dtype=np.float32, copy=True)
+            if depth_image.ndim != 2:
+                raise ValueError("depth must be a 2D image")
+            self._depth_images[pose_id] = depth_image
         for frontier in frontiers if frontiers is not None else []:
             # Invalid network predictions must not poison spatial matching/JSON.
             position = np.asarray(frontier.pos3d, dtype=float)

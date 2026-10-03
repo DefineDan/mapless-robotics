@@ -54,6 +54,7 @@ class AnalysisResult:
     observation: Observation
     frontiers: list
     marked_rgb: np.ndarray
+    depth: np.ndarray | None = None
 
 
 class ExplorationPipeline:
@@ -78,16 +79,16 @@ class ExplorationPipeline:
             depth=depth,
             extrinsic_camera_pos=opencv_extrinsic(observation.camera_pose),
         )
-        return [] if result is None else result
+        return ([], depth) if result is None else (result, depth)
 
     def process_with_visualization(self, observation)->AnalysisResult:
-        frontiers = self.process(observation)
+        frontiers, depth = self.process(observation)
         visualize = getattr(self.frontier_extractor, "visualize", None)
         marked = visualize(frontiers) if visualize is not None else observation.rgb
         # Own the result before another inference can mutate detector buffers.
         marked = np.array(marked, dtype=np.uint8, copy=True)
         marked.setflags(write=False)
-        return AnalysisResult(observation, frontiers, marked)
+        return AnalysisResult(observation, frontiers, marked, depth)
 
 
 class AnalysisTrigger:
@@ -168,6 +169,7 @@ class ExplorationWorker:
             observation.timestamp,
             observation.camera_pose,
             frame_index,
+            depth=result.depth,
         )
         self.last_result = result
         return pose_id

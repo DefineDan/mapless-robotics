@@ -10,13 +10,15 @@ from .keys import action_for_key, key_name
 
 
 class RerunView:
-    def __init__(self, *, spawn=True):
+    def __init__(self, *, spawn=True, enable_edge_vis=False, enable_depth_vis=True):
         import rerun as rr
         import rerun.blueprint as rrb
 
         self.rr = rr
         self.step = 0
         self.last_camera_log = -float("inf")
+        self.enable_edge_vis = enable_edge_vis
+        self.enable_depth_vis = enable_depth_vis
         rr.init("frontier_exploration", spawn=spawn)
         rr.send_blueprint(
             rrb.Blueprint(
@@ -112,6 +114,30 @@ class RerunView:
         rr.log(
             "detections/image", rr.Image(result.marked_rgb).compress(jpeg_quality=90)
         )
+        depth = result.depth
+        intrinsics = getattr(graph, "camera_intrinsics", None)
+        if self.enable_depth_vis and depth is not None and intrinsics is not None:
+            depth = np.asarray(depth, dtype=np.float32)
+            rgb = np.asarray(result.observation.rgb)
+            stride = max(1, int(np.ceil(max(depth.shape) / 160)))
+            height, width = depth.shape
+            v, u = np.mgrid[0:height:stride, 0:width:stride]
+            z = depth[::stride, ::stride]
+            valid = np.isfinite(z) & (z > 0)
+            fx, fy = float(intrinsics[0, 0]), float(intrinsics[1, 1])
+            cx, cy = float(intrinsics[0, 2]), float(intrinsics[1, 2])
+            # Depth is forward distance. Convert OpenCV (+Z forward, +Y down)
+            # into Habitat camera coordinates (-Z forward, +Y up).
+            camera_points = np.stack(
+                ((u - cx) * z / fx, -(v - cy) * z / fy, -z), axis=-1
+            )[valid]
+            camera_pose = np.asarray(result.observation.camera_pose, dtype=float)
+            world_points = camera_points @ camera_pose[:3, :3].T + camera_pose[:3, 3]
+            colors = rgb[::stride, ::stride][valid]
+            rr.log(
+                "world/depth_cloud",
+                rr.Points3D(world_points, colors=colors, radii=0.012),
+            )
         rr.log(
             "detections/status",
             rr.TextDocument(
@@ -137,11 +163,15 @@ class RerunView:
                     colors=[(35, 100, 210)],
                 ),
             )
-            edges = [
-                [poses[node.parent_id], poses[node.id]]
-                for node in graph.poses.values()
-                if node.parent_id is not None
-            ]
+            edges = (
+                [
+                    [poses[node.parent_id], poses[node.id]]
+                    for node in graph.poses.values()
+                    if node.parent_id is not None
+                ]
+                if self.enable_edge_vis
+                else []
+            )
             if edges:
                 rr.log(
                     "world/pose_connections",
@@ -202,7 +232,7 @@ class RerunView:
                 for node in nodes
                 for pose_id in {obs["pose_id"] for obs in node.observations}
             ]
-            if observed_from:
+            if observed_from and self.enable_edge_vis:
                 rr.log(
                     "world/observations",
                     rr.LineStrips3D(observed_from, colors=[(170, 170, 170)]),
