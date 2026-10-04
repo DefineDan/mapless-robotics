@@ -10,7 +10,10 @@ from .keys import action_for_key, key_name
 
 
 class RerunView:
-    def __init__(self, *, spawn=True, enable_edge_vis=False, enable_depth_vis=True):
+    def __init__(
+        self, *, spawn=True, enable_edge_vis=False, enable_depth_vis=True,
+        enable_navigation_points_vis=False,
+    ):
         import rerun as rr
         import rerun.blueprint as rrb
 
@@ -19,6 +22,7 @@ class RerunView:
         self.last_camera_log = -float("inf")
         self.enable_edge_vis = enable_edge_vis
         self.enable_depth_vis = enable_depth_vis
+        self.enable_navigation_points_vis = enable_navigation_points_vis
         rr.init("frontier_exploration", spawn=spawn)
         rr.send_blueprint(
             rrb.Blueprint(
@@ -75,12 +79,15 @@ class RerunView:
         )
         if graph is not None and graph.ena_map is not None:
             grid, (map_x, map_z, map_theta) = graph.ena_map.get_map()
-            # GridMap is rendered in 3D as a planar raster. ExplorationMap's
-            # first axis is world X and its second is world Z, so rotate its
-            # local XY image plane onto Habitat's XZ ground plane.
-            height, width = grid.shape
+            # ExplorationMap already stores rows along world Z and columns
+            # along world X. GridMap uses top-row-first image data, while the
+            # map's row zero is its low-Z edge, so flip the rows vertically.
+            # GridMap's translation is the lower-left image corner, not the
+            # center of the map or the first (top) row.
             occupancy = np.full(grid.shape, -1, dtype=np.int8)
             occupancy[grid == 255] = 0  # observed/known area
+            occupancy = occupancy[::-1, :]
+            height, width = occupancy.shape
             rr.log(
                 "world/exploration_map",
                 rr.GridMap(
@@ -94,7 +101,7 @@ class RerunView:
                     cell_size=graph.ena_map.resolution,
                     translation=[map_x, 0.0, map_z],
                     rotation_axis_angle=rr.components.RotationAxisAngle(
-                        [1.0, 0.0, 0.0], -np.pi / 2
+                        [1.0, 0.0, 0.0], np.pi / 2
                     ),
                     colormap=rr.components.Colormap.RvizMap,
                     opacity=0.75,
@@ -108,6 +115,56 @@ class RerunView:
                     f"resolution={graph.ena_map.resolution:.3f} m/cell"
                 ),
             )
+
+    def log_navigation_map(self, navigator):
+        if self.enable_navigation_points_vis:
+            points = navigator.get_point_cloud()
+            if len(points):
+                self.rr.log(
+                    "world/depth_navigation_points",
+                    self.rr.Points3D(points, colors=[(255, 180, 40)], radii=0.025),
+                )
+        grid, origin = navigator.get_map()
+        if not grid.size:
+            return
+        rr = self.rr
+        # get_map() stores planar coordinates as [axis 0, axis 1]. Rerun
+        # expects a top-row-first image, with columns along local +X and rows
+        # along local +Y. The X/-Z rotation below maps those axes onto Habitat
+        # world X/Z, so transpose the grid and reverse its rows accordingly.
+        occupancy = np.full(grid.shape, -1, dtype=np.int8)
+        occupancy[grid > 0] = 100
+        occupancy = occupancy.T[::-1, :]
+        height, width = occupancy.shape
+        plane = navigator.plane_indices
+        translation = np.zeros(3, dtype=float)
+        translation[plane[0]] = origin[0]
+        # GridMap translation is the lower-left corner. Reversing image rows
+        # makes row zero the high end of axis 1, but leaves the lower edge at
+        # the map origin.
+        translation[plane[1]] = origin[1]
+        # The raster axes follow the configured planar axes. For the default
+        # X/Z ground plane, rotating the image plane around X places it on the
+        # Habitat floor, matching the exploration map visualization.
+        rr.log(
+            "world/depth_navigation_map",
+            rr.GridMap(
+                data=occupancy.tobytes(),
+                format=rr.components.ImageFormat(
+                    width=width,
+                    height=height,
+                    color_model="L",
+                    channel_datatype="U8",
+                ),
+                cell_size=navigator.resolution,
+                translation=translation,
+                rotation_axis_angle=rr.components.RotationAxisAngle(
+                    [1.0, 0.0, 0.0], np.pi / 2
+                ),
+                colormap=rr.components.Colormap.RvizMap,
+                opacity=0.85,
+            ),
+        )
 
     def log_analysis(self, result, pose_id, graph):
         rr = self.rr

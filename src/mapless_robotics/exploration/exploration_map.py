@@ -31,9 +31,9 @@ class ExplorationMap:
     def get_map(self):
         """Return the occupancy grid and its world pose ``(x, z, theta)``.
 
-        The grid's first array axis is world X and its second is world Z;
-        ``theta`` is zero because the grid is axis-aligned. The returned grid
-        is a copy, so callers cannot modify the map accidentally.
+        The grid is row-major as ``[z_cell, x_cell]``; ``theta`` is zero
+        because it is axis-aligned. The returned grid is a copy, so callers
+        cannot modify the map accidentally.
         """
         return self.map.copy(), (float(self.origin[0]), float(self.origin[1]), 0.0)
 

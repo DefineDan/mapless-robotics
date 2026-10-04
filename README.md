@@ -145,6 +145,10 @@ PYTHONPATH=src python -m mapless_robotics.walk_frontiers \
   --exploration manual --depth-source habitat --viewer rerun
 ```
 
+Add `--show-navigation-points` to show the recent 2D depth-navigation cloud
+as 3D points at the latest camera's height, transformed into Habitat world
+coordinates (Y is up by default).
+
 Rerun opens in a separate window. **Keep the terminal focused for the keys**;
 press `f` to analyze, arrows to move, A/D to turn, W/S to tilt, `g` to save,
 and Q/Escape to quit. The blue points and lines are processed robot poses,

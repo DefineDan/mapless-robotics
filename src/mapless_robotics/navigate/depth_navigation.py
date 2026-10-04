@@ -16,7 +16,8 @@ class DepthNavigation:
     def __init__(
         self,
         history_size=5,
-        delta=0.4,
+        positive_delta=0.4,
+        negative_delta=0.8,
         occupancy_resolution=0.1,
         max_depth=5.0,
         obstacle_influence=0.8,
@@ -31,12 +32,13 @@ class DepthNavigation:
             raise ValueError("history_size must be positive")
         if vertical_axis not in {"x", "y", "z"}:
             raise ValueError("vertical_axis must be 'x', 'y', or 'z'")
-        values = (delta, occupancy_resolution, max_depth, obstacle_influence,
+        values = (positive_delta, negative_delta, occupancy_resolution, max_depth, obstacle_influence,
                   linear_speed, angular_gain, max_angular_speed, goal_tolerance)
         if not np.isfinite(values).all() or min(values) <= 0:
             raise ValueError("navigation distances and speeds must be finite and positive")
         self.history_size = int(history_size)
-        self.delta = float(delta)
+        self.positive_delta = float(positive_delta)
+        self.negative_delta = float(negative_delta)
         self.resolution = float(occupancy_resolution)
         self.max_depth = float(max_depth)
         self.obstacle_influence = float(obstacle_influence)
@@ -96,7 +98,9 @@ class DepthNavigation:
                                  -(rows - cy) * z / fy,
                                  -z))
         world = local @ pose[:3, :3].T + pose[:3, 3]
-        within_height = np.abs(world[:, self.vertical_index] - pose[self.vertical_index, 3]) <= self.delta
+        height_delta = world[:, self.vertical_index] - pose[self.vertical_index, 3]
+        within_height = ((height_delta <= self.positive_delta)
+                         & (height_delta >= -self.negative_delta))
         points = world[within_height][:, self.plane_indices]
 
         self.goal = goal
@@ -152,3 +156,44 @@ class DepthNavigation:
                                 -self.max_angular_speed, self.max_angular_speed))
         linear = self.linear_speed * max(0.0, dot)
         return float(linear), angular
+
+    def get_map(self):
+        """Return ``(grid, origin)`` for the current planar obstacle map.
+
+        ``grid`` is a uint8 raster with 255 for occupied cells and 0 for
+        unobserved cells. ``origin`` gives the world-plane coordinates of
+        the grid's lower-left cell; each cell spans ``resolution`` metres.
+        The first raster axis follows ``plane_indices[0]`` and the second
+        follows ``plane_indices[1]``.
+        """
+        if not self.occupancy:
+            return np.zeros((0, 0), dtype=np.uint8), np.zeros(2, dtype=float)
+
+        cells = np.asarray(list(self.occupancy), dtype=np.int64)
+        minimum = cells.min(axis=0)
+        maximum = cells.max(axis=0)
+        grid = np.zeros(tuple(maximum - minimum + 1), dtype=np.uint8)
+        indices = cells - minimum
+        grid[indices[:, 0], indices[:, 1]] = 255
+        origin = minimum.astype(float) * self.resolution
+        return grid, origin
+
+    def get_point_cloud(self):
+        """Return recent obstacle points in Habitat world XYZ coordinates.
+
+        The planar coordinates are inserted on ``plane_indices`` and the
+        latest camera position supplies the configured vertical coordinate.
+        This maps the navigation frame's vertical axis onto Habitat's world
+        axes (Y is up for the default configuration).
+        """
+        if self.camera_pose is None or not self._frames:
+            return np.zeros((0, 3), dtype=float)
+        points = np.concatenate(tuple(self._frames), axis=0)
+        if not len(points):
+            return np.zeros((0, 3), dtype=float)
+        world_points = np.zeros((len(points), 3), dtype=float)
+        world_points[:, self.plane_indices] = points
+        world_points[:, self.vertical_index] = self.camera_pose[
+            self.vertical_index, 3
+        ]
+        return world_points

@@ -44,6 +44,11 @@ class OpenCVViewer:
                 grid, _map_pose = graph.ena_map.get_map()
                 cv2.imshow("Exploration map", render_map(grid, graph.ena_map.resolution))
 
+    def log_navigation_map(self, navigator):
+        grid, _origin = navigator.get_map()
+        if grid.size:
+            cv2.imshow("Depth navigation map", render_map(grid, navigator.resolution))
+
     def log_analysis(self, result, pose_id, graph):
         frame = cv2.cvtColor(result.marked_rgb, cv2.COLOR_RGB2BGR)
         frame = cv2.copyMakeBorder(

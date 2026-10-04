@@ -168,6 +168,11 @@ def build_parser():
         default="opencv",
         help="Visualization backend (default: opencv)",
     )
+    parser.add_argument(
+        "--show-navigation-points",
+        action="store_true",
+        help="Show the recent 2D depth-navigation point cloud in Rerun",
+    )
     parser.add_argument("--scene", help="Path to a .glb scene (overrides --index)")
     parser.add_argument(
         "--scenes-dir",
@@ -291,7 +296,11 @@ def main() -> None:
         state = agent.get_state()
         state.position = sim.pathfinder.get_random_navigable_point()
         agent.set_state(state)
-        viewer = RerunView() if args.viewer == "rerun" else OpenCVViewer()
+        viewer = (
+            RerunView(enable_navigation_points_vis=args.show_navigation_points)
+            if args.viewer == "rerun"
+            else OpenCVViewer()
+        )
         status = "Press f to analyze" if worker else "Exploration off"
 
         print("Arrows move | a/d turn | w/s look | f analyze | g save | q quit")
@@ -344,6 +353,8 @@ def main() -> None:
                     "Analyzing captured frame..." if worker and worker.busy else status
                 )
                 viewer.log_camera(observation, time.monotonic(), graph=graph)
+                if navigator.occupancy:
+                    viewer.log_navigation_map(navigator)
                 key = viewer.get_keys()
                 if key == "quit":
                     break
