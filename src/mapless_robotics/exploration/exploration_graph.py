@@ -438,6 +438,14 @@ class ExplorationGraph:
             self.objective_frontier = None
         return frontier
 
+    def set_objective_unreachable(self):
+        """Clear and remove the currently selected objective frontier."""
+        objective = self.objective_frontier
+        if objective is None:
+            return None
+        objective.is_objective = False
+        return self.eliminate_frontier(objective.id)
+
     def add_frontier(self, frontier, pose_id):
         """Consume OpenFrontier's world-frame ``pos3d``; return its graph ID."""
         if pose_id not in self.poses:
@@ -546,6 +554,7 @@ class ExplorationGraph:
             return objective
         cosine = float(np.clip(np.dot(direction, to_goal) / (direction_norm * goal_norm), -1.0, 1.0))
         angle = float(np.degrees(np.arccos(cosine)))
+        print(f"Distance to objective: {distance:.3f}, angle to objective: {angle:.3f}")
         if distance <= self.visited_distance and angle <= self.fusion_angle_degrees:
             self.eliminate_frontier(objective.id)
             return self.select_frontier(position)

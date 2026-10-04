@@ -26,6 +26,7 @@ class DepthNavigation:
         angular_gain=1.5,
         max_angular_speed=1.0,
         goal_tolerance=0.25,
+        heading_tolerance=0.1,
         vertical_axis="y",
         camera_intrinsics=None,
         planner=None,
@@ -35,7 +36,8 @@ class DepthNavigation:
         if vertical_axis not in {"x", "y", "z"}:
             raise ValueError("vertical_axis must be 'x', 'y', or 'z'")
         values = (positive_delta, negative_delta, occupancy_resolution, max_depth,
-                  linear_speed, angular_gain, max_angular_speed, goal_tolerance)
+                  linear_speed, angular_gain, max_angular_speed, goal_tolerance,
+                  heading_tolerance)
         if not np.isfinite(values).all() or min(values) <= 0:
             raise ValueError("navigation distances and speeds must be finite and positive")
         self.history_size = int(history_size)
@@ -47,6 +49,7 @@ class DepthNavigation:
         self.angular_gain = float(angular_gain)
         self.max_angular_speed = float(max_angular_speed)
         self.goal_tolerance = float(goal_tolerance)
+        self.heading_tolerance = float(heading_tolerance)
         self.vertical_index = {"x": 0, "y": 1, "z": 2}[vertical_axis]
         self.plane_indices = [i for i in range(3) if i != self.vertical_index]
         self.camera_intrinsics = camera_intrinsics
@@ -146,8 +149,7 @@ class DepthNavigation:
 
         position = self.camera_pose[:3, 3][self.plane_indices]
         target = self.goal[self.plane_indices]
-        if float(np.linalg.norm(target - position)) <= self.goal_tolerance:
-            return 0.0, 0.0
+        goal_distance = float(np.linalg.norm(target - position))
         if not len(self.trajectory):
             return 0.0, 0.0
 
@@ -158,11 +160,21 @@ class DepthNavigation:
             if np.linalg.norm(delta) > self.goal_tolerance:
                 break
             self._trajectory_index += 1
-        desired = self.trajectory[self._trajectory_index] - position
-        distance = float(np.linalg.norm(desired))
-        if distance < 1e-9:
-            return 0.0, 0.0
-        desired /= distance
+        if goal_distance <= self.goal_tolerance:
+            # Face the goal while approaching it. At the goal itself, use the
+            # last path segment as the desired final heading.
+            desired = target - position
+            if np.linalg.norm(desired) < 1e-9 and len(self.trajectory) > 1:
+                desired = self.trajectory[-1] - self.trajectory[-2]
+            if np.linalg.norm(desired) < 1e-9:
+                return 0.0, 0.0
+            desired /= np.linalg.norm(desired)
+        else:
+            desired = self.trajectory[self._trajectory_index] - position
+            distance = float(np.linalg.norm(desired))
+            if distance < 1e-9:
+                return 0.0, 0.0
+            desired /= distance
 
         # Camera forward is local -Z, projected into the selected ground plane.
         forward = (self.camera_pose[:3, :3] @ np.array([0.0, 0.0, -1.0]))[self.plane_indices]
@@ -175,6 +187,12 @@ class DepthNavigation:
         # In Habitat's X-right/Z-forward ground plane, positive yaw about +Y
         # turns left, so negate the 2D cross product's sign convention.
         angle = float(np.arctan2(-cross, dot))
+        if goal_distance <= self.goal_tolerance:
+            if abs(angle) <= self.heading_tolerance:
+                return 0.0, 0.0
+            angular = float(np.clip(self.angular_gain * angle,
+                                    -self.max_angular_speed, self.max_angular_speed))
+            return 0.0, angular
         angular = float(np.clip(self.angular_gain * angle,
                                 -self.max_angular_speed, self.max_angular_speed))
         linear = self.linear_speed * max(0.0, dot)

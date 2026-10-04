@@ -312,7 +312,7 @@ def main() -> None:
             if args.viewer == "rerun"
             else OpenCVViewer()
         )
-        status = "Press f to analyze" if worker else "Exploration off"
+        status = "Press f to analyze, u to mark objective unreachable" if worker else "Exploration off"
 
         print("Arrows move | a/d turn | w/s look | f analyze | g save | q quit")
 
@@ -379,6 +379,13 @@ def main() -> None:
                 if key == "f" and worker:
                     if not worker.submit(observation, time.monotonic(), manual=True):
                         status = "Analysis already running"
+
+                elif key == "u":
+                    unreachable = graph.set_objective_unreachable()
+                    if unreachable is not None:
+                        status = f"Marked frontier {unreachable.id} unreachable"
+                        viewer.set_status(status)
+                        viewer.log_analysis(worker.last_result, pose_id, graph)
 
                 elif key == "g" and worker:
                     graph.save(output)

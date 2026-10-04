@@ -17,7 +17,7 @@ def key_name(code):
         return "right"
     if code in (ord("q"), 27):
         return "quit"
-    if code in (ord("f"), ord("g")):
+    if code in (ord("f"), ord("g"), ord("u")):
         return chr(code)
     if code in (ord("a"), ord("d"), ord("w"), ord("s")):
         return chr(code)

@@ -254,7 +254,7 @@ class RerunView:
             nodes = list(graph.frontiers.values())
             for is_objective, entity, objective_color, radius in (
                 (False, "world/frontiers", None, 0.13),
-                (True, "world/objective_frontier", (255, 40, 40), 0.22),
+                (True, "world/objective_frontier", (255, 40, 40), 0.15),
             ):
                 displayed = [node for node in nodes if node.is_objective == is_objective]
                 if not displayed:
