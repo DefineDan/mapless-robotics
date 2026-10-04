@@ -4,6 +4,8 @@ from collections import deque
 
 import numpy as np
 
+from .planners import AStarPlanner
+
 
 class DepthNavigation:
     """Generate planar velocity commands from a goal and recent depth frames.
@@ -20,19 +22,19 @@ class DepthNavigation:
         negative_delta=0.8,
         occupancy_resolution=0.1,
         max_depth=5.0,
-        obstacle_influence=0.8,
         linear_speed=0.25,
         angular_gain=1.5,
         max_angular_speed=1.0,
         goal_tolerance=0.25,
         vertical_axis="y",
         camera_intrinsics=None,
+        planner=None,
     ):
         if history_size < 1:
             raise ValueError("history_size must be positive")
         if vertical_axis not in {"x", "y", "z"}:
             raise ValueError("vertical_axis must be 'x', 'y', or 'z'")
-        values = (positive_delta, negative_delta, occupancy_resolution, max_depth, obstacle_influence,
+        values = (positive_delta, negative_delta, occupancy_resolution, max_depth,
                   linear_speed, angular_gain, max_angular_speed, goal_tolerance)
         if not np.isfinite(values).all() or min(values) <= 0:
             raise ValueError("navigation distances and speeds must be finite and positive")
@@ -41,7 +43,6 @@ class DepthNavigation:
         self.negative_delta = float(negative_delta)
         self.resolution = float(occupancy_resolution)
         self.max_depth = float(max_depth)
-        self.obstacle_influence = float(obstacle_influence)
         self.linear_speed = float(linear_speed)
         self.angular_gain = float(angular_gain)
         self.max_angular_speed = float(max_angular_speed)
@@ -49,6 +50,9 @@ class DepthNavigation:
         self.vertical_index = {"x": 0, "y": 1, "z": 2}[vertical_axis]
         self.plane_indices = [i for i in range(3) if i != self.vertical_index]
         self.camera_intrinsics = camera_intrinsics
+        self.planner = planner or AStarPlanner(self.resolution, self.plane_indices, inflation_radius=0.1)
+        self.trajectory = np.zeros((0, 2), dtype=float)
+        self._trajectory_index = 0
         self._frames = deque(maxlen=self.history_size)
         self.goal = None
         self.camera_pose = None
@@ -112,35 +116,54 @@ class DepthNavigation:
             for cell in cells:
                 key = (int(cell[0]), int(cell[1]))
                 self.occupancy[key] = self.occupancy.get(key, 0) + 1
+
+        # Plan a new trajectory
+        self.trajectory = self.planner.plan(
+            self.camera_pose, self.goal, self.get_map(), resolution=self.resolution
+        )
+
+        if len(self.trajectory) == 0:
+            print("DepthNavigation: no path found to goal")
+
+        self._trajectory_index = 0
         return self.occupancy
 
-    def get_command(self):
-        """Return ``(linear_velocity, angular_velocity)`` in m/s and rad/s."""
+    def get_command(self, camera_pose=None):
+        """Return ``(linear_velocity, angular_velocity)`` in m/s and rad/s.
+
+        An optional latest camera-to-world pose updates the agent position and
+        heading used to calculate the command.
+        """
+        if camera_pose is not None:
+            pose = np.asarray(camera_pose, dtype=float)
+            if (pose.shape != (4, 4) or not np.isfinite(pose).all()
+                    or not np.allclose(pose[3], [0, 0, 0, 1])):
+                raise ValueError("camera_pose must be a finite 4x4 local-to-world matrix")
+            self.camera_pose = pose.copy()
+
         if self.goal is None or self.camera_pose is None:
             raise RuntimeError("Call set_data before get_command")
+
         position = self.camera_pose[:3, 3][self.plane_indices]
         target = self.goal[self.plane_indices]
-        attractive = target - position
-        distance = float(np.linalg.norm(attractive))
-        if distance <= self.goal_tolerance:
+        if float(np.linalg.norm(target - position)) <= self.goal_tolerance:
             return 0.0, 0.0
-        force = attractive / max(distance, self.goal_tolerance)
-
-        # Repel from nearby occupied cell centers. Multiple observations in a
-        # cell strengthen confidence that the obstacle is real.
-        for cell, count in self.occupancy.items():
-            obstacle = (np.asarray(cell, dtype=float) + 0.5) * self.resolution
-            away = position - obstacle
-            obstacle_distance = float(np.linalg.norm(away))
-            if 1e-6 < obstacle_distance < self.obstacle_influence:
-                strength = min(count, self.history_size) / self.history_size
-                force += (strength * (1 / obstacle_distance - 1 / self.obstacle_influence)
-                          / obstacle_distance**2) * (away / obstacle_distance)
-
-        force_norm = float(np.linalg.norm(force))
-        if force_norm < 1e-9:
+        if not len(self.trajectory):
             return 0.0, 0.0
-        desired = force / force_norm
+
+        # Advance past route cells already reached; the planner's waypoints
+        # represent cell centers, so use the goal tolerance as the threshold.
+        while self._trajectory_index < len(self.trajectory) - 1:
+            delta = self.trajectory[self._trajectory_index] - position
+            if np.linalg.norm(delta) > self.goal_tolerance:
+                break
+            self._trajectory_index += 1
+        desired = self.trajectory[self._trajectory_index] - position
+        distance = float(np.linalg.norm(desired))
+        if distance < 1e-9:
+            return 0.0, 0.0
+        desired /= distance
+
         # Camera forward is local -Z, projected into the selected ground plane.
         forward = (self.camera_pose[:3, :3] @ np.array([0.0, 0.0, -1.0]))[self.plane_indices]
         forward_norm = float(np.linalg.norm(forward))
@@ -157,6 +180,31 @@ class DepthNavigation:
         linear = self.linear_speed * max(0.0, dot)
         return float(linear), angular
 
+    def get_sim_action(self, linear, angular, integration_time=0.1):
+        """Return a callable that applies velocities to a Habitat simulator."""
+        import habitat_sim
+
+        from habitat_sim.utils.common import quat_from_magnum, quat_to_magnum
+
+        vel = habitat_sim.physics.VelocityControl()
+        vel.controlling_lin_vel = vel.controlling_ang_vel = True
+        vel.lin_vel_is_local = vel.ang_vel_is_local = True
+        vel.linear_velocity = np.array([0.0, 0.0, -float(linear)])
+        vel.angular_velocity = np.array([0.0, float(angular), 0.0])
+
+        def apply(sim):
+            agent = sim.get_agent(0)
+            state = agent.get_state()
+            previous = habitat_sim.RigidState(
+                quat_to_magnum(state.rotation), state.position
+            )
+            target = vel.integrate_transform(float(integration_time), previous)
+            state.position = sim.step_filter(previous.translation, target.translation)
+            state.rotation = quat_from_magnum(target.rotation)
+            agent.set_state(state, reset_sensors=False)
+
+        return apply
+
     def get_map(self):
         """Return ``(grid, origin)`` for the current planar obstacle map.
 
@@ -172,6 +220,15 @@ class DepthNavigation:
         cells = np.asarray(list(self.occupancy), dtype=np.int64)
         minimum = cells.min(axis=0)
         maximum = cells.max(axis=0)
+        # Keep the current pose inside the raster, even when it lies beyond
+        # the observed obstacle bounds. A* can then start at its real cell
+        # instead of clipping it to an unrelated map edge.
+        if self.camera_pose is not None:
+            start = np.floor(
+                self.camera_pose[:3, 3][self.plane_indices] / self.resolution
+            ).astype(np.int64)
+            minimum = np.minimum(minimum, start)
+            maximum = np.maximum(maximum, start)
         grid = np.zeros(tuple(maximum - minimum + 1), dtype=np.uint8)
         indices = cells - minimum
         grid[indices[:, 0], indices[:, 1]] = 255

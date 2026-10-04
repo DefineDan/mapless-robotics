@@ -214,6 +214,17 @@ def build_parser():
     )
     parser.add_argument("--depth-model", default="lpiccinelli/unik3d-vitl")
     parser.add_argument(
+        "--enable_auto",
+        action="store_true",
+        help="Automatically apply each newly generated navigation command",
+    )
+    parser.add_argument(
+        "--integration-time",
+        type=float,
+        default=0.1,
+        help="Seconds to integrate each automatic navigation command (default: 0.1)",
+    )
+    parser.add_argument(
         "--frontier-weights", type=Path, help="OpenFrontier RGB-D checkpoint"
     )
     parser.add_argument(
@@ -330,11 +341,18 @@ def main() -> None:
                                     result.depth,
                                     result.observation.camera_pose,
                                 )
-                                linear, angular = navigator.get_command()
+                                linear, angular = navigator.get_command(
+                                    observation.camera_pose
+                                )
                                 print(
                                     "Navigation command: "
                                     f"linear={linear:.3f} m/s, angular={angular:.3f} rad/s"
                                 )
+                                if args.enable_auto:
+                                    action = navigator.get_sim_action(
+                                        linear, angular, args.integration_time
+                                    )
+                                    action(sim)
                             elif objective is None:
                                 print("Navigation command: no active objective frontier")
                             status = (
@@ -353,7 +371,7 @@ def main() -> None:
                     "Analyzing captured frame..." if worker and worker.busy else status
                 )
                 viewer.log_camera(observation, time.monotonic(), graph=graph)
-                if navigator.occupancy:
+                if navigator.occupancy or len(navigator.trajectory):
                     viewer.log_navigation_map(navigator)
                 key = viewer.get_keys()
                 if key == "quit":

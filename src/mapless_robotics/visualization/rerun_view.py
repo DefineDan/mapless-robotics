@@ -117,6 +117,7 @@ class RerunView:
             )
 
     def log_navigation_map(self, navigator):
+        rr = self.rr
         if self.enable_navigation_points_vis:
             points = navigator.get_point_cloud()
             if len(points):
@@ -124,10 +125,25 @@ class RerunView:
                     "world/depth_navigation_points",
                     self.rr.Points3D(points, colors=[(255, 180, 40)], radii=0.025),
                 )
+        trajectory = np.asarray(getattr(navigator, "trajectory", ()), dtype=float)
+        if trajectory.ndim == 2 and trajectory.shape[1] == 2 and len(trajectory):
+            path_points = np.zeros((len(trajectory), 3), dtype=float)
+            path_points[:, navigator.plane_indices] = trajectory
+            if navigator.camera_pose is not None:
+                # path_points[:, navigator.vertical_index] = navigator.camera_pose[navigator.vertical_index, 3]
+                path_points[:, navigator.vertical_index] = 0
+            rr.log(
+                "world/depth_navigation_trajectory",
+                rr.LineStrips3D([path_points], colors=[(40, 220, 255)], radii=0.035),
+            )
+            rr.log(
+                "world/depth_navigation_waypoints",
+                rr.Points3D(path_points, colors=[(40, 220, 255)], radii=0.05),
+            )
+
         grid, origin = navigator.get_map()
         if not grid.size:
             return
-        rr = self.rr
         # get_map() stores planar coordinates as [axis 0, axis 1]. Rerun
         # expects a top-row-first image, with columns along local +X and rows
         # along local +Y. The X/-Z rotation below maps those axes onto Habitat
