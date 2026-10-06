@@ -291,4 +291,201 @@ Q/Escape to quit. Choose
 frontier captures. The route frames and graph are saved together under
 `runs/explore_navigate/<timestamp>/`; `--run-dir` and `--graph-output`
 override those paths. Habitat is initialized before LoTIS to avoid the LLVM
-collision seen when both are loaded in the opposite order.
+
+## Automatic frontier exploration with LoTIS recovery
+
+The new launcher uses the existing exploration, depth-navigation and Rerun
+components, with LoTIS returning to saved viewpoints during exploration:
+
+```bash
+python -m mapless_robotics.auto_explore_navigate \
+  --index 10 --depth-source habitat \
+  --dinov3-weights /path/to/dinov3_vitb16_pretrain.pth
+```
+
+Use the same `--scene`, `--scenes-dir`, `--frontier-weights`, `--lotis-config`,
+`--checkpoint` and `--model-config` overrides as `explore_navigate`. The default
+is `--exploration periodic --interval 0.5`; full depth/frontier checks run in the
+existing background worker while navigating. `--interval` adjusts the minimum
+submission interval; actual checks also depend on inference time. `f` can request
+an immediate check. Depth navigation applies commands continuously between completed
+analyses (default 10 Hz), so repeated `f` presses are unnecessary. Simulator
+body/sensor poses and depth are used with `--depth-source habitat`; estimated
+depth continues to use UniK3D and is refreshed when an analysis finishes.
+
+The start position and heading are now randomized on each launch. Startup prints
+`Start XYZ=..., yaw=..., seed=...`; that information is also saved in
+`route.json`. Add `--seed 42` to reproduce a start, or try another seed to start
+elsewhere. To choose a specific location, pass `--start-position X Y Z` and
+optionally `--start-yaw 90` (degrees: 0 faces world -Z, 90 faces world -X). The
+position must be on the scene's navmesh; invalid positions report an error.
+
+The automatic launcher starts with the camera tilted **10 degrees downward**.
+Set `--camera-pitch 15` for 15 degrees down, `--camera-pitch 0` for a level view,
+or a negative value to look up (allowed range: -80 to 80 degrees). RGB and Habitat
+depth use the same sensor pitch, which remains configured when the agent's
+position or heading is initialized or reset. The initial pitch is saved in
+`route.json`. `walk_frontiers` and `explore_navigate` accept the same option and
+default to a level camera. Their camera configuration is in
+`walk_frontiers.make_sim`; `walk.py` defines a separate simulator for its own
+launcher. A `look_down` action before `agent.set_state(state)` is reset to the
+configured pitch, so use this option to set the initial view. W/S still adjust
+the camera during exploration.
+
+The agent first detects frontiers in its current view and commits to one goal.
+It refreshes frontiers regularly while driving and retains newly observed
+alternatives. A higher-gain alternative does not interrupt the active goal.
+After arrival, rejection with `u`, or repeated low-quality target detections,
+it first analyzes the current view again. Candidates seen in that fresh capture
+are preferred, ranked by their current gain; older candidates are a fallback.
+When no candidates remain, If that
+view is empty, it scans up to six directions around the full circle, stopping as
+soon as a direction yields candidates. It waits for each stationary capture to
+finish before rotating again. `--scan-views 4` changes the direction count;
+`--scan-views 0` disables sweeping. If all directions are empty, the agent pauses.
+Move to a new viewpoint with the keyboard, then Space to resume discovery.
+
+Keep the terminal focused:
+
+- `u`: mark the active frontier unreachable, check the current view, then select
+  a local alternative before falling back to saved candidates from older views.
+- Space: pause/resume automatic navigation. Arrow/A/D/W/S movement pauses it too.
+- `f`: force a capture; `g`: save frames, route metadata and the graph.
+- `r`: retry a cancelled or timed-out LoTIS return.
+- Enter: declare the object found, save the retained route, reset to the start
+  and follow it with LoTIS. Object detection remains an operator decision.
+- Q/Escape: quit exploration/retrieval; during a LoTIS return, stop and pause.
+
+The reduced OpenFrontier integration exposes gain. Fresh local candidates are
+ranked by gain in the current capture; historical fallback candidates use **peak
+observed gain**, without the ordinary graph's distance penalty or visit decay.
+Historical alternatives stay in memory, including frontiers seen on detours
+removed from the retrieval route. The current goal stays fixed until reached or
+marked unreachable or invalidated by repeated low-quality matches; higher-gain
+alternatives wait for the next selection. Each full check records target status
+in `pipeline_memory.objective_check` and Rerun's pipeline status. Three consecutive
+matching detections with gain below the graph's minimum (default 0.5), nonfinite
+or missing gain, or an explicit invalid flag retire the goal as `invalidated`.
+A missing detection marks it `not_observed` and resets this streak: absence alone
+does not prove a target unreachable. A good detection resets the streak too.
+Reached, rejected and invalidated frontiers are retained as history,
+but are not selected again.
+
+Before returning anywhere, selection waits for a fresh completed capture at the
+current position. For a reobserved frontier, the nearest recorded observing pose
+to the current robot position is used, with newer poses winning ties.
+For a remote alternative, LoTIS follows the recorded route backward to its
+observing body pose. If that viewpoint lies on an archived branch, it first
+returns to the shared junction and then follows the archived branch forward.
+It aligns with the saved heading, restores the saved camera pitch, and hands
+control back to depth navigation toward that frontier. An alternative at the
+current viewpoint can be selected directly. Selecting a saved goal restores its
+observing heading and camera pitch, clears the old local occupancy, and uses fresh
+depth from that view. Every successful return forces a full frontier/depth check, including
+with `--exploration manual`; Habitat depth initializes local navigation immediately
+at the returned position. Arrival currently
+uses simulator ground-plane distance: 0.3 m for a return viewpoint and 0.5 m for
+a frontier. A missing local path stops motion; use `u` to reject the target.
+
+During a LoTIS return, Rerun marks the selected frontier in **yellow**, labelled
+`RETURN FRONTIER F...`, and its saved observing viewpoint in **cyan**, labelled
+with the pose and recorded frame IDs. The cyan arrow shows the saved heading;
+the connecting line identifies the observation, rather than a planned path.
+The **Return viewpoint** panel shows the saved RGB image, and **Return target**
+shows the IDs and return status. These markers stay visible if the return pauses
+and are cleared after a successful return. The ordinary red objective marker
+updates as soon as a frontier is selected. Manual returns with `n` in
+`explore_navigate` use the same markers.
+
+The automatic return condition compares the robot with the selected observing
+viewpoint: more than **0.5 m** away triggers LoTIS. A pending recovery after `u`
+also enters the return flow; a viewpoint already within **0.3 m** skips the
+corresponding travel leg. A higher-gain candidate alone does not interrupt an
+active goal, and a missing local path alone does not automatically reject it.
+
+After a **successful** return, the route suffix beyond that viewpoint is excluded
+from retrieval, including the outbound detour and its redundant return. Archived
+frame IDs remain stable, so saved frontier observations still reference the
+correct image after multiple returns. The graph retains excluded pose IDs and
+retired frontiers in `pipeline_memory`; the viewer shows excluded branches in
+red and the retained graph path in blue. Historical frontier markers remain
+visible: reached frontiers are gray; unreachable and invalidated frontiers are muted red.
+Retired frontier positions
+are suppressed within the larger of the merge and visit radii to prevent repeated
+detections from reviving the same target. This marks an abandoned branch unusable
+for retrieval; it does not label its physically traversable corridor as an
+obstacle, since LoTIS needs that corridor to return.
+
+Outputs live in `runs/auto_explore_navigate/<timestamp>/` (or `--run-dir`):
+
+- `archive/`: recorded exploration images, including abandoned detours.
+- `frames/`: the ordered, loop-pruned RGB route for retrieval.
+- `route.json`: active archive frame IDs, archive parent IDs for revisiting older
+  branches, excluded branches and reasons, and `retrieval_ready` (false while a return is unresolved).
+- `graph.json`: observations, active/retired frontier memory and excluded poses
+  (`--graph-output` can place the graph elsewhere).
+
+The automatic launcher wraps LoTIS with a guarded visual policy for return and
+retrieval. Return references omit intermediate stationary/near-duplicate poses
+(0.15 m spacing, retaining both endpoints). The initial backward alignment follows
+the recorded travel direction rather than blindly turning 180 degrees from the
+current heading. Steering requires finite image-space predictions inside the
+camera view with visibility above the configured threshold. It skips projected
+self poses and uses a visible point ahead in the requested route direction.
+
+Travel speed follows the LoTIS method's `forward_velocity` (0.4 m/s in the bundled
+config), with `--lotis-speed` providing an optional lower cap. Large heading errors
+enter a turn-in-place mode at 35 degrees; forward motion resumes below 20 degrees,
+so noisy predictions around one threshold do not alternate forward/stop commands.
+Forward speed tapers continuously during aligned steering corrections.
+
+Return and retrieval encodings include the recorded body positions, subsampled
+with exactly the same frame indices. Lookahead uses 0.35 m of recorded path spacing.
+LoTIS's distance head outputs normalized values in [0, 1]; these are used to rank
+closest frames, not interpreted as metres for this lookahead. If reference
+positions are absent, the wrapper retains its relative-distance fallback.
+
+Near the endpoint, slowdown uses measured simulator distance when available:
+it tapers speed inside 0.75 m instead of creeping at 0.05 m/s because of a small
+normalized prediction while physically farther away. The older 0.05 m/s fallback
+is retained for callers that do not provide a measured distance. Arrival still
+uses measured simulator distance. An endpoint approach that fails to reduce the
+measured goal distance by 0.03 m for 60 steps stops for retry.
+
+LoTIS runs synchronously: each prediction advances the simulator by 0.1 simulated
+seconds. Slow inference therefore produces slower playback than the configured
+m/s value. CPU execution defaults to 8 PyTorch threads (`--lotis-cpu-threads` can
+override this); excessive CPU threads can make localization substantially slower.
+Startup prints device, CPU thread count and speed limit. Return diagnostics
+include `inference_ms`, `cycle_ms`, `control_dt_s`, `linear_mps`, `angular_rps`,
+`goal_distance_m` and `goal_radius_m`, alongside localization predictions. The
+reported cycle time includes capture and visualization before motion; it is
+not a claim that the simulator runs in real time.
+
+When no usable route point is visible, the agent searches in place and stops after
+60 unsuccessful prediction steps. It also stops if it advances less than 0.1 m
+for 80 driving steps. A stopped return pauses for `r` and keeps the archived route.
+These are visual-policy safeguards, not a simulator shortest-path fallback, and
+they do not guarantee LoTIS can localize every backward view.
+
+The terminal prints return-reference frame counts and LoTIS status periodically.
+Rerun's `pipeline/return_status` includes `tracking`, `searching`,
+`no_visible_lookahead`, `endpoint_approach` or `lost_stop`, plus visible-point counts and the encoded
+nearest/target frame indices when available. Those indices refer to the compacted,
+possibly subsampled reference used by LoTIS, not archive frame IDs.
+
+A stopped or timed-out return preserves the route for retry and prevents Enter
+from starting retrieval. After `u`, the agent checks the current view first and uses historical alternatives
+if that view yields none. It sweeps other directions if no candidates remain.
+If discovery is exhausted, turn/move to another viewpoint and Space to resume.
+This produces
+a route with abandoned detours removed, not a guaranteed globally shortest path.
+The launcher starts a fresh session; these outputs do not implement resumable
+LoTIS/controller state.
+
+Verify the route-memory, worker integration and navigation completion behavior
+without loading models or starting Habitat:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
+```

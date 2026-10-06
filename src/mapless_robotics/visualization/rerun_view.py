@@ -125,6 +125,8 @@ class RerunView:
                     "world/depth_navigation_points",
                     self.rr.Points3D(points, colors=[(255, 180, 40)], radii=0.025),
                 )
+        for entity in ("world/depth_navigation_trajectory", "world/depth_navigation_waypoints"):
+            rr.log(entity, rr.Clear(recursive=True))
         trajectory = np.asarray(getattr(navigator, "trajectory", ()), dtype=float)
         if trajectory.ndim == 2 and trajectory.shape[1] == 2 and len(trajectory):
             path_points = np.zeros((len(trajectory), 3), dtype=float)
@@ -143,6 +145,7 @@ class RerunView:
 
         grid, origin = navigator.get_map()
         if not grid.size:
+            rr.log("world/depth_navigation_map", rr.Clear(recursive=True))
             return
         # get_map() stores planar coordinates as [axis 0, axis 1]. Rerun
         # expects a top-row-first image, with columns along local +X and rows
@@ -184,9 +187,10 @@ class RerunView:
 
     def log_analysis(self, result, pose_id, graph):
         rr = self.rr
-        rr.log(
-            "detections/image", rr.Image(result.marked_rgb).compress(jpeg_quality=90)
-        )
+        if result.frontier_analysis:
+            rr.log(
+                "detections/image", rr.Image(result.marked_rgb).compress(jpeg_quality=90)
+            )
         depth = result.depth
         intrinsics = getattr(graph, "camera_intrinsics", None)
         if self.enable_depth_vis and depth is not None and intrinsics is not None:
@@ -211,14 +215,39 @@ class RerunView:
                 "world/depth_cloud",
                 rr.Points3D(world_points, colors=colors, radii=0.012),
             )
-        rr.log(
-            "detections/status",
-            rr.TextDocument(
-                f"Pose {pose_id}: {len(result.frontiers)} detections; "
-                f"capture time {result.observation.timestamp:.3f}"
-            ),
-        )
-        poses = {node.id: np.asarray(node.pose)[:3, 3] for node in graph.poses.values()}
+        if result.frontier_analysis:
+            rr.log(
+                "detections/status",
+                rr.TextDocument(
+                    f"Pose {pose_id}: {len(result.frontiers)} detections; "
+                    f"capture time {result.observation.timestamp:.3f}"
+                ),
+            )
+        for entity in ("world/frontiers", "world/objective_frontier",
+                       "world/frontier_directions", "world/observations",
+                       "world/pose_connections", "world/poses", "world/pose_directions",
+                       "world/excluded_branches", "world/frontier_history"):
+            rr.log(entity, rr.Clear(recursive=True))
+        history = getattr(graph, "retired_frontiers", [])
+        if history:
+            rr.log("world/frontier_history", rr.Points3D(
+                [item["frontier"]["position"] for item in history],
+                colors=[(160, 60, 60) if item["reason"] in {"unreachable", "invalidated"}
+                        else (135, 135, 135) for item in history],
+                radii=0.09,
+                labels=[f"F{item['frontier']['id']} {item['reason']}" for item in history],
+            ))
+        excluded = getattr(graph, "excluded_pose_ids", set())
+        visible_poses = [node for node in graph.poses.values() if node.id not in excluded]
+        excluded_edges = [
+            [graph.poses[node.parent_id].pose[:3, 3], node.pose[:3, 3]]
+            for node in graph.poses.values()
+            if node.id in excluded and node.parent_id in graph.poses
+        ]
+        if excluded_edges:
+            rr.log("world/excluded_branches", rr.LineStrips3D(
+                excluded_edges, colors=[(180, 65, 65)]))
+        poses = {node.id: np.asarray(node.pose)[:3, 3] for node in visible_poses}
         if poses:
             rr.log(
                 "world/poses",
@@ -226,7 +255,7 @@ class RerunView:
             )
             pose_directions = [
                 -np.asarray(node.pose, dtype=float)[:3, 2] * 0.4
-                for node in graph.poses.values()
+                for node in visible_poses
             ]
             rr.log(
                 "world/pose_directions",
@@ -239,8 +268,8 @@ class RerunView:
             edges = (
                 [
                     [poses[node.parent_id], poses[node.id]]
-                    for node in graph.poses.values()
-                    if node.parent_id is not None
+                    for node in visible_poses
+                    if node.parent_id in poses
                 ]
                 if self.enable_edge_vis
                 else []
@@ -304,9 +333,61 @@ class RerunView:
                 [poses[pose_id], node.position]
                 for node in nodes
                 for pose_id in {obs["pose_id"] for obs in node.observations}
+                if pose_id in poses
             ]
             if observed_from and self.enable_edge_vis:
                 rr.log(
                     "world/observations",
                     rr.LineStrips3D(observed_from, colors=[(170, 170, 170)]),
                 )
+
+    def log_return_target(self, frontier, pose, reference_rgb, *, score=None,
+                          status="Returning"):
+        """Mark the frontier and the saved viewpoint LoTIS must reach first."""
+        rr = self.rr
+        self.clear_return_target()
+        viewpoint = np.asarray(pose.pose)[:3, 3]
+        gain_label = f" | peak gain {score:.3f}" if score is not None else ""
+        rr.log(
+            "world/return_target/frontier",
+            rr.Points3D(
+                [frontier.position], colors=[(255, 210, 40)], radii=0.25,
+                labels=[f"RETURN FRONTIER F{frontier.id}{gain_label}"],
+                show_labels=True,
+            ),
+        )
+        rr.log(
+            "world/return_target/viewpoint",
+            rr.Points3D(
+                [viewpoint], colors=[(40, 220, 255)], radii=0.18,
+                labels=[f"{status}: P{pose.id} | frame {pose.frame_index}"],
+                show_labels=True,
+            ),
+        )
+        rr.log(
+            "world/return_target/viewpoint_heading",
+            rr.Arrows3D(
+                origins=[viewpoint], vectors=[-np.asarray(pose.pose)[:3, 2] * 0.6],
+                colors=[(40, 220, 255)],
+            ),
+        )
+        rr.log(
+            "world/return_target/observation",
+            rr.LineStrips3D([[viewpoint, frontier.position]],
+                            colors=[(40, 220, 255)], radii=0.025),
+        )
+        rr.log("return_target/image", rr.Image(reference_rgb).compress(jpeg_quality=90))
+        rr.log(
+            "return_target/status",
+            rr.TextDocument(
+                f"{status} to P{pose.id} (recorded frame {pose.frame_index}), "
+                f"then depth navigation to F{frontier.id}{gain_label}.\n"
+                "Yellow: selected frontier. Cyan: saved return viewpoint and heading.\n"
+                "The connecting line shows which viewpoint observed the frontier."
+            ),
+        )
+
+    def clear_return_target(self):
+        """Remove the previous return markers and reference image."""
+        for entity in ("world/return_target", "return_target"):
+            self.rr.log(entity, self.rr.Clear(recursive=True))

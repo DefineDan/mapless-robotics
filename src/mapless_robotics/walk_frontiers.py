@@ -77,7 +77,15 @@ def resolve_scene(scene=None, index=25, scenes_dir=None):
     raise FileNotFoundError(message)
 
 
-def make_sim(scene_path: str, with_depth=False):
+def camera_pitch_degrees(value):
+    """Parse a camera tilt in degrees: positive looks down, negative looks up."""
+    pitch = float(value)
+    if not np.isfinite(pitch) or not -80.0 <= pitch <= 80.0:
+        raise argparse.ArgumentTypeError("camera pitch must be between -80 and 80 degrees")
+    return pitch
+
+
+def make_sim(scene_path: str, with_depth=False, camera_pitch=0.0):
     import habitat_sim
 
     # 1. Simulator: which scene to load
@@ -91,6 +99,8 @@ def make_sim(scene_path: str, with_depth=False):
     rgb.resolution = [480, 640]  # height, width
     rgb.position = [0.0, 1.5, 0.0]
     rgb.hfov = 90.0
+    # Habitat cameras face local -Z, so negative rotation about X looks down.
+    rgb.orientation = [-np.deg2rad(camera_pitch_degrees(camera_pitch)), 0.0, 0.0]
 
     # 3. Agent: the body carrying the sensor, plus the discrete actions it can take
     agent_cfg = habitat_sim.agent.AgentConfiguration()
@@ -102,6 +112,7 @@ def make_sim(scene_path: str, with_depth=False):
         depth.resolution = rgb.resolution
         depth.position = rgb.position
         depth.hfov = rgb.hfov
+        depth.orientation = rgb.orientation
         agent_cfg.sensor_specifications.append(depth)
     agent_cfg.action_space = {
         "move_forward": habitat_sim.agent.ActionSpec(
@@ -214,6 +225,13 @@ def build_parser():
     )
     parser.add_argument("--depth-model", default="lpiccinelli/unik3d-vitl")
     parser.add_argument(
+        "--camera-pitch",
+        type=camera_pitch_degrees,
+        default=20.0,
+        help="Initial camera tilt in degrees, positive down, negative up "
+        "(-80 to 80; default: %(default)s)",
+    )
+    parser.add_argument(
         "--enable_auto",
         action="store_true",
         help="Automatically apply each newly generated navigation command",
@@ -292,7 +310,8 @@ def main() -> None:
             worker = make_worker(args, graph, trigger)
         print(f"Loading {scene}")
         sim = make_sim(
-            str(scene), with_depth=worker is not None and args.depth_source == "habitat"
+            str(scene), with_depth=worker is not None and args.depth_source == "habitat",
+            camera_pitch=args.camera_pitch,
         )
         if not sim.pathfinder.is_loaded:
             import habitat_sim
@@ -398,7 +417,7 @@ def main() -> None:
             if worker:
                 print("Finishing pending analysis and saving graph...")
                 try:
-                    final_pose_id = worker.close()
+                    final_pose_id, _ = worker.close()
                     if final_pose_id is not None and viewer:
                         viewer.start_step()
                         viewer.log_analysis(

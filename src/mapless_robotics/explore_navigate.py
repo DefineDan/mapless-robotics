@@ -29,6 +29,7 @@ from .exploration.exploration import (
 from .exploration.exploration_graph import ExplorationGraph, PoseNode
 from .visualization.rerun_view import RerunView
 from .terminal_keyboard import TerminalKeyboard
+from .visualization.keys import action_for_key, key_name
 from .walk_frontiers import (
     build_parser,
     capture,
@@ -36,7 +37,6 @@ from .walk_frontiers import (
     make_worker,
     resolve_scene,
 )
-from .walk import KEY_TO_ACTION
 
 if TYPE_CHECKING:
     import argparse
@@ -80,7 +80,9 @@ def configure_view(view: RerunView) -> None:
                     rrb.Spatial2DView(name="Live camera and LoTIS", origin="camera"),
                     rrb.Spatial2DView(name="Detected frontiers", origin="detections"),
                     rrb.Spatial2DView(name="Last recorded frame", origin="last_recorded_frame"),
-                    rrb.Spatial2DView(name="Goal", origin="goal"),
+                    rrb.Spatial2DView(name="LoTIS goal", origin="goal"),
+                    rrb.Spatial2DView(name="Return viewpoint", origin="return_target/image"),
+                    rrb.TextDocumentView(name="Return target", origin="return_target/status"),
                     rrb.Spatial2DView(
                         name="Closest trajectory frame", origin="closest_trajectory_frame"
                     ),
@@ -142,7 +144,7 @@ def poll_analysis(
     if worker is None:
         return
     try:
-        pose_id = worker.poll()
+        pose_id, _ = worker.poll()
         if pose_id is not None:
             view.log_analysis(worker.last_result, pose_id, graph)
             graph.save(graph_output)
@@ -181,14 +183,19 @@ def subsample(frames: list[np.ndarray], max_frames: int) -> list[np.ndarray]:
 
 
 def encode_route(
-    method: LoTISNavigationMethod, frames: list[np.ndarray], tracking_mode: str
+    method: LoTISNavigationMethod, frames: list[np.ndarray], tracking_mode: str,
+    positions: list[np.ndarray] | None = None,
 ) -> None:
-    frames = subsample(frames, method.localizer.max_seq_len)
+    indices = np.linspace(0, len(frames) - 1, min(len(frames), method.localizer.max_seq_len), dtype=int)
+    if positions is not None and len(positions) != len(frames):
+        raise ValueError('Route images and positions must have the same length')
+    frames = [frames[index] for index in indices]
     method.reset_episode(
         {
             "rgb_images": [Image.fromarray(frame) for frame in frames],
             "tracking_mode": tracking_mode,
             "goal_point_id": None,
+            "route_positions": None if positions is None else [positions[index] for index in indices],
         }
     )
 
@@ -234,6 +241,7 @@ def setup_frontier_navigation(
         f"Navigating to pose {pose.id} (frame {pose.frame_index}) for F{frontier_id}, "
         f"{len(route)} frames back"
     )
+    view.log_return_target(graph.frontiers[frontier_id], pose, route[0])
     # Backward tracking heads for frame 0 of the route: the target pose.
     encode_route(method, route, "backward")
     view.rr.log("goal", view.rr.Image(route[0]).compress(jpeg_quality=90))
@@ -263,8 +271,10 @@ def drive(
     states: list[AgentState] | None = None,
     goal_yaw: float | None = None,
     turn_around: bool = False,
+    goal_radius: float = GOAL_RADIUS,
+    initial_yaw: float | None = None,
 ) -> bool:
-    """Let LoTIS drive towards goal_position. Returns False if q/Escape stopped it.
+    """Let LoTIS drive to the goal. False means cancelled or step limit reached.
 
     With turn_around, first turn 180 degrees in place so the route back is in view.
     With goal_yaw, turn in place on arrival until facing that heading.
@@ -274,7 +284,12 @@ def drive(
     distance = np.inf
     arrived = False
     target_yaw = None  # while set, turn in place towards it instead of using LoTIS
+    progress_position = None
+    stalled_steps = 0
+    endpoint_best_distance = None
+    endpoint_stalled_steps = 0
     for step in range(max_steps):
+        iteration_started = time.perf_counter()
         observation = capture(sim, agent)
         rgb = observation.rgb
         if intrinsics is None:
@@ -287,11 +302,47 @@ def drive(
         poll_analysis(worker, graph, view, graph_output)
         if frames is not None:
             record_frame(observation, agent.get_state(), frames, states, view, turned)
-        if turn_around and step == 0:
-            target_yaw = yaw(observation.robot_pose) + np.pi
+        if step == 0:
+            if initial_yaw is not None:
+                target_yaw = initial_yaw
+            elif turn_around:
+                target_yaw = yaw(observation.robot_pose) + np.pi
+        distance = float(np.linalg.norm(
+            (agent.get_state().position - goal_position)[[0, 2]]
+        ))
+        if distance < goal_radius and not arrived:
+            if goal_yaw is None:
+                return True
+            arrived = True
+            target_yaw = goal_yaw
         if target_yaw is None:
+            policy_obs['goal_distance_m'] = distance
             action = method.act(policy_obs)
             method.visualize(policy_obs)
+            diagnostics = getattr(method, "diagnostics", None)
+            if isinstance(diagnostics, dict):
+                diagnostics['cycle_ms'] = round((time.perf_counter() - iteration_started) * 1000, 1)
+                diagnostics['control_dt_s'] = 0.1
+                diagnostics['goal_distance_m'] = distance
+                diagnostics['goal_radius_m'] = goal_radius
+                if diagnostics.get('status') == 'endpoint_approach':
+                    if endpoint_best_distance is None or distance < endpoint_best_distance - 0.03:
+                        endpoint_best_distance = distance
+                        endpoint_stalled_steps = 0
+                    else:
+                        endpoint_stalled_steps += 1
+                    if endpoint_stalled_steps >= 60:
+                        print(f"Visible endpoint is not converging: {distance:.2f} m from goal; stopped for retry")
+                        return False
+                else:
+                    endpoint_best_distance = None
+                    endpoint_stalled_steps = 0
+                view.rr.log("pipeline/return_status", view.rr.TextDocument(str(diagnostics)))
+                if step % 20 == 0:
+                    print(f"LoTIS return: {diagnostics}")
+            if getattr(method, "navigation_failed", False) is True:
+                print("LoTIS lost the reference route; stopped for retry")
+                return False
         key = keyboard.poll(0)
         if key in QUIT:
             print("Navigation stopped")
@@ -308,18 +359,29 @@ def drive(
             if arrived:
                 print("Facing the original view")
                 return True
-            print("Turned around; LoTIS takes over")
+            print("Aligned with return route; LoTIS takes over")
             continue
         step_velocity(sim, action.linear_velocity, action.angular_velocity)
-        distance = float(np.linalg.norm(agent.get_state().position - goal_position))
-        if distance < GOAL_RADIUS: # TODO: use lotis to determine when we arrived
+        if isinstance(getattr(method, "diagnostics", None), dict):
+            position = np.asarray(agent.get_state().position)
+            if progress_position is None or np.linalg.norm((position - progress_position)[[0, 2]]) >= 0.1:
+                progress_position = position.copy()
+                stalled_steps = 0
+            else:
+                stalled_steps += 1
+                if stalled_steps >= 80:
+                    print(f"LoTIS return made no translational progress for 80 steps; "
+                          f"{distance:.2f} m from goal; stopped for retry")
+                    return False
+        distance = float(np.linalg.norm((agent.get_state().position - goal_position)[[0, 2]]))
+        if distance < goal_radius: # TODO: use lotis to determine when we arrived
             print(f"Reached the goal in {step + 1} steps")
             if goal_yaw is None:
                 return True
             arrived = True
             target_yaw = goal_yaw
     print(f"Stopped after {max_steps} steps, {distance:.2f} m from the goal")
-    return True
+    return False
 
 
 def navigate_to_frontier(
@@ -352,6 +414,7 @@ def navigate_to_frontier(
         graph_output, view, keyboard, max_steps, step_velocity, turned,
         frames, states, goal_yaw=yaw(pose.pose), turn_around=True,
     )
+    view.clear_return_target()
     print("Back to manual exploration")
 
 
@@ -402,7 +465,7 @@ def explore(
             print(help_line)
             continue
         offer_capture(worker, observation, key, graph, graph_output, len(frames) - 1)
-        action = KEY_TO_ACTION.get(key)
+        action = action_for_key(key_name(key))
         if action is not None:
             sim.step(action)
 
@@ -426,7 +489,7 @@ def navigate(
     agent.set_state(states[0])
     view.rr.log("goal", view.rr.Image(frames[-1]).compress(jpeg_quality=90))
     print("Encoding explored route...")
-    encode_route(method, frames, "forward")
+    encode_route(method, frames, "forward", positions=[state.position for state in states])
     print("Navigating with LoTIS; press q to stop")
     drive(
         sim, agent, method, states[-1].position, worker, graph, graph_output,
@@ -466,6 +529,7 @@ def main() -> None:
         sim = make_sim(
             str(scene),
             with_depth=args.exploration != "off" and args.depth_source == "habitat",
+            camera_pitch=args.camera_pitch,
         )
         if not sim.pathfinder.is_loaded:
             import habitat_sim
@@ -526,7 +590,7 @@ def main() -> None:
     finally:
         if worker is not None:
             try:
-                pose_id = worker.close()
+                pose_id, _ = worker.close()
                 if pose_id is not None and view is not None:
                     view.start_step()
                     view.log_analysis(worker.last_result, pose_id, graph)
