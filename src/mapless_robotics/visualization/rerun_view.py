@@ -180,7 +180,8 @@ class RerunView:
         # along local +Y. The X/-Z rotation below maps those axes onto Habitat
         # world X/Z, so transpose the grid and reverse its rows accordingly.
         occupancy = np.full(grid.shape, -1, dtype=np.int8)
-        occupancy[grid > 0] = 100
+        occupancy[grid == 1] = 0
+        occupancy[grid == 255] = 100
         occupancy = occupancy.T[::-1, :]
         height, width = occupancy.shape
         plane = navigator.plane_indices

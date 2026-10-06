@@ -11,17 +11,27 @@ class AStarPlanner:
     """Plan an 8-connected path through free cells in an occupancy raster.
 
     The map is ``(grid, origin)`` as returned by ``DepthNavigation.get_map``;
-    occupied cells have nonzero values and all other cells are traversable.
+    Cells use 0 for unknown, 1 for observed free, and 255 for occupied.
+    Unknown cells are traversable at a configurable additional cost.
     ``inflation_radius`` expands obstacles by a Euclidean radius in metres.
     Poses are world-frame XYZ points or 4x4 local-to-world transforms.
     """
 
-    def __init__(self, resolution=0.1, plane_indices=(0, 2), inflation_radius=0.0):
+    def __init__(
+        self,
+        resolution=0.1,
+        plane_indices=(0, 2),
+        inflation_radius=0.0,
+        unknown_cost=3.0,
+    ):
         self.resolution = float(resolution)
         self.plane_indices = tuple(plane_indices)
         self.inflation_radius = float(inflation_radius)
+        self.unknown_cost = float(unknown_cost)
         if not np.isfinite(self.inflation_radius) or self.inflation_radius < 0:
             raise ValueError("inflation_radius must be finite and non-negative")
+        if not np.isfinite(self.unknown_cost) or self.unknown_cost < 1:
+            raise ValueError("unknown_cost must be finite and at least 1")
         self.path = np.zeros((0, 2), dtype=float)
 
 
@@ -32,7 +42,7 @@ class AStarPlanner:
         if radius_cells == 0 or not grid.size:
             return grid
 
-        occupied = (grid != 0).astype(np.uint8)
+        occupied = (grid == 255).astype(np.uint8)
 
         kernel_size = 2 * radius_cells + 1
         kernel = np.zeros((kernel_size, kernel_size), dtype=np.uint8)
@@ -86,13 +96,14 @@ class AStarPlanner:
 
         start = np.floor((self._plane_position(pose) - origin) / cell_size).astype(int)
         goal = np.floor((self._plane_position(goal_pose) - origin) / cell_size).astype(int)
-        free = grid == 0
+        traversable = grid != 255
+        traversal_cost = np.where(grid == 1, 1.0, self.unknown_cost)
 
         def closest_free(cell):
             clipped = np.clip(cell, (0, 0), np.array(grid.shape) - 1)
-            if free[tuple(clipped)]:
+            if traversable[tuple(clipped)]:
                 return tuple(map(int, clipped))
-            candidates = np.argwhere(free)
+            candidates = np.argwhere(traversable)
             if not len(candidates):
                 return None
             index = int(np.argmin(np.sum((candidates - cell) ** 2, axis=1)))
@@ -118,13 +129,13 @@ class AStarPlanner:
                 neighbor = (current[0] + di, current[1] + dj)
                 if (neighbor[0] < 0 or neighbor[1] < 0
                         or neighbor[0] >= grid.shape[0] or neighbor[1] >= grid.shape[1]
-                        or not free[neighbor]):
+                        or not traversable[neighbor]):
                     continue
-                if di and dj and (not free[current[0] + di, current[1]]
-                                  or not free[current[0], current[1] + dj]):
+                if di and dj and (not traversable[current[0] + di, current[1]]
+                                  or not traversable[current[0], current[1] + dj]):
                     continue
                 step = 1.41421356237 if di and dj else 1.0
-                new_cost = cost[current] + step
+                new_cost = cost[current] + step * traversal_cost[neighbor]
                 if new_cost >= cost.get(neighbor, float("inf")):
                     continue
                 cost[neighbor] = new_cost
