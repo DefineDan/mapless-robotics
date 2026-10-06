@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .exploration_graph import pose_matrix
+from .exploration_graph import pose_matrix, ExplorationGraph
 
 
 def camera_intrinsics(width, height, hfov_degrees):
@@ -54,6 +54,7 @@ class AnalysisResult:
     observation: Observation
     frontiers: list
     marked_rgb: np.ndarray
+    depth: np.ndarray | None = None
 
 
 class ExplorationPipeline:
@@ -78,16 +79,16 @@ class ExplorationPipeline:
             depth=depth,
             extrinsic_camera_pos=opencv_extrinsic(observation.camera_pose),
         )
-        return [] if result is None else result
+        return ([], depth) if result is None else (result, depth)
 
-    def process_with_visualization(self, observation):
-        frontiers = self.process(observation)
+    def process_with_visualization(self, observation)->AnalysisResult:
+        frontiers, depth = self.process(observation)
         visualize = getattr(self.frontier_extractor, "visualize", None)
         marked = visualize(frontiers) if visualize is not None else observation.rgb
         # Own the result before another inference can mutate detector buffers.
         marked = np.array(marked, dtype=np.uint8, copy=True)
         marked.setflags(write=False)
-        return AnalysisResult(observation, frontiers, marked)
+        return AnalysisResult(observation, frontiers, marked, depth)
 
 
 class AnalysisTrigger:
@@ -132,7 +133,7 @@ class AnalysisTrigger:
 class ExplorationWorker:
     """One in-flight capture, no stale inference queue. Graph stays on UI thread."""
 
-    def __init__(self, pipeline, graph, trigger):
+    def __init__(self, pipeline:ExplorationPipeline, graph: ExplorationGraph, trigger: AnalysisTrigger):
         self.pipeline, self.graph, self.trigger = pipeline, graph, trigger
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="frontier")
         self.future = None
@@ -154,23 +155,24 @@ class ExplorationWorker:
         self.trigger.mark_submitted(observation, now)
         return True
 
-    def poll(self):
+    def poll(self)->tuple[int | None, AnalysisResult | None]:
         if self.future is None or not self.future.done():
-            return None
+            return None, None
         future, observation, frame_index = (
             self.future, self.observation, self.frame_index
         )
         self.future = self.observation = self.frame_index = None
-        result = future.result()  # Caller reports errors; no partial pose.
+        result: AnalysisResult = future.result()  # Caller reports errors; no partial pose.
         pose_id = self.graph.add_frontiers_graph(
             result.frontiers,
             observation.robot_pose,
             observation.timestamp,
             observation.camera_pose,
             frame_index,
+            depth=result.depth,
         )
         self.last_result = result
-        return pose_id
+        return pose_id, result
 
     def close(self):
         self.executor.shutdown(wait=True)

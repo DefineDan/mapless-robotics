@@ -14,24 +14,21 @@ STOPS = (
 UNKNOWN_COLOR = (150, 150, 150)
 
 
-def latest_gain(node):
-    """Use the newest finite measurement, retaining earlier ones if later gain is absent."""
-    for observation in reversed(node.observations):
-        value = observation.get("gain")
-        if value is None or not np.isscalar(value):
-            continue
-        try:
-            gain = float(value)
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(gain):
-            return gain
-    return None
+def latest_u_gain(node):
+    """Return the frontier's current finite utility gain for display."""
+    value = node.u_gain
+    if value is None or not np.isscalar(value):
+        return None
+    try:
+        gain = float(value)
+    except (TypeError, ValueError):
+        return None
+    return gain if np.isfinite(gain) else None
 
 
-def gain_colors(nodes):
-    """Return RGB colors and the current finite gain range for frontier nodes."""
-    gains = [latest_gain(node) for node in nodes]
+def u_gain_colors(nodes):
+    """Return RGB colors and the current finite u_gain range for frontier nodes."""
+    gains = [latest_u_gain(node) for node in nodes]
     finite = [gain for gain in gains if gain is not None]
     if not finite:
         return [UNKNOWN_COLOR] * len(gains), None

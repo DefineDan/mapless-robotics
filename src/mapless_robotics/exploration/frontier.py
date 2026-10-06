@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-OPENFRONTIER_ROOT = Path(__file__).resolve().parents[2] / "external" / "OpenFrontier"
+OPENFRONTIER_ROOT = Path(__file__).resolve().parents[3] / "external" / "OpenFrontier"
 
 
 def _openfrontier_imports():

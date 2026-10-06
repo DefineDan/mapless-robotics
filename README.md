@@ -89,12 +89,12 @@ The default detector settings come from OpenFrontier's `config/navigation.yaml`;
 that file are not used by this pipeline.
 
 For this workspace, a scene and checkpoint are already available in the sibling
-`openfrontier` checkout. From `mapless-robotics/`, run:
+`OpenFrontier` checkout. From `mapless-robotics/`, run:
 
 ```bash
 PYTHONPATH=src python -m mapless_robotics.walk_frontiers \
-  --scene ../openfrontier/examples/mv2HUxq3B53.glb \
-  --frontier-weights ../openfrontier/model_weights/rgbd_11cls.pth \
+  --scene ../OpenFrontier/examples/mv2HUxq3B53.glb \
+  --frontier-weights ../OpenFrontier/model_weights/rgbd_11cls.pth \
   --exploration manual --depth-source habitat
 ```
 
@@ -140,10 +140,14 @@ capture, and a native 3D pose/frontier graph to Rerun:
 
 ```bash
 PYTHONPATH=src python -m mapless_robotics.walk_frontiers \
-  --scene ../openfrontier/examples/mv2HUxq3B53.glb \
-  --frontier-weights ../openfrontier/model_weights/rgbd_11cls.pth \
+  --scene ../OpenFrontier/examples/mv2HUxq3B53.glb \
+  --frontier-weights ../OpenFrontier/model_weights/rgbd_11cls.pth \
   --exploration manual --depth-source habitat --viewer rerun
 ```
+
+Add `--show-navigation-points` to show the recent 2D depth-navigation cloud
+as 3D points at the latest camera's height, transformed into Habitat world
+coordinates (Y is up by default).
 
 Rerun opens in a separate window. **Keep the terminal focused for the keys**;
 press `f` to analyze, arrows to move, A/D to turn, W/S to tilt, `g` to save,
@@ -243,7 +247,7 @@ original repository format. Point the script to the downloaded file:
 
 ```bash
 PYTHONPATH=src python -m mapless_robotics.teach_repeat \
-  --scene ../openfrontier/examples/mv2HUxq3B53.glb \
+  --scene ../OpenFrontier/examples/mv2HUxq3B53.glb \
   --dinov3-weights /path/to/dinov3_vitb16_pretrain.pth
 ```
 
@@ -273,8 +277,8 @@ From `mapless-robotics/` with the project environment activated:
 
 ```bash
 PYTHONPATH=src python -m mapless_robotics.explore_navigate \
-  --scene ../openfrontier/examples/mv2HUxq3B53.glb \
-  --frontier-weights ../openfrontier/model_weights/rgbd_11cls.pth \
+  --scene ../OpenFrontier/examples/mv2HUxq3B53.glb \
+  --frontier-weights ../OpenFrontier/model_weights/rgbd_11cls.pth \
   --dinov3-weights models/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth \
   --exploration manual --depth-source habitat
 ```
@@ -288,27 +292,3 @@ frontier captures. The route frames and graph are saved together under
 `runs/explore_navigate/<timestamp>/`; `--run-dir` and `--graph-output`
 override those paths. Habitat is initialized before LoTIS to avoid the LLVM
 collision seen when both are loaded in the opposite order.
-
-
-
-
-python -m mapless_robotics.explore_navigate \
-  --index 10 \
-  --scenes-dir /Users/dan/Code/kth/mapless-robotics/data/versioned_data/hm3d-0.2/hm3d/train \
-  --exploration manual --depth-source habitat \
-  --lotis-config /Users/dan/Code/kth/kth-mapless-robotics/src/mapless_robotics/configs/lotis_config.yaml \
-  --checkpoint /Users/dan/Code/kth/mapless-robotics/models/lotis/final_model.pth \
-  --model-config /Users/dan/Code/kth/mapless-robotics/models/lotis/final_config.yaml
-
-
-python -m mapless_robotics.teach_repeat --index 10 --checkpoint /Users/dan/Code/kth/mapless-robotics/models/lotis/final_model.pth --lotis-config /Users/dan/Code/kth/kth-mapless-robotics/src/mapless_robotics/configs/lotis_config.yaml
-
-
-python -m mapless_robotics.walk_frontiers --index 10 --scenes-dir /Users/dan/Code/kth/mapless-robotics/data/versioned_data/hm3d-0.2/hm3d/train --viewer rerun
-
-
-Alright got it. Now let's advance. The idea is the following. 
-
-We have our exploration graph and we want to use that to navigate during the exploration phase (called teach phase right now). Maybe lets rename it. We have an expolartion phase and then a navigation / retrieval phase (where we just go to the goal called repeat right now). Well the main idea is that I want to use lotis to navigate during expolration as well. Here is how it should work:
-
-Based on the exploration graph we have for each frontier node Pose nodes that are connected to it. 
