@@ -30,13 +30,13 @@ from .exploration.exploration_graph import ExplorationGraph, PoseNode
 from .visualization.rerun_view import RerunView
 from .terminal_keyboard import TerminalKeyboard
 from .walk_frontiers import (
-    KEY_TO_ACTION,
     build_parser,
     capture,
     make_sim,
     make_worker,
     resolve_scene,
 )
+from .walk import KEY_TO_ACTION
 
 if TYPE_CHECKING:
     import argparse
