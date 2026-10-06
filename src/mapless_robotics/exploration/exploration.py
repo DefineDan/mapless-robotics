@@ -55,6 +55,7 @@ class AnalysisResult:
     frontiers: list
     marked_rgb: np.ndarray
     depth: np.ndarray | None = None
+    frontier_analysis: bool = True
 
 
 class ExplorationPipeline:
@@ -62,7 +63,7 @@ class ExplorationPipeline:
         self.frontier_extractor = frontier_extractor
         self.depth_estimator = depth_estimator
 
-    def process(self, observation):
+    def estimate_depth(self, observation):
         depth = (
             self.depth_estimator(observation.rgb)
             if self.depth_estimator is not None
@@ -73,7 +74,14 @@ class ExplorationPipeline:
         depth = np.asarray(depth, dtype=np.float32)
         if depth.shape != observation.rgb.shape[:2]:
             raise ValueError("Depth and RGB resolutions must match")
-        depth = np.where(np.isfinite(depth) & (depth > 0), depth, 0)
+        return np.where(np.isfinite(depth) & (depth > 0), depth, 0)
+
+    def process_depth(self, observation):
+        return AnalysisResult(observation, [], observation.rgb,
+                              self.estimate_depth(observation), frontier_analysis=False)
+
+    def process(self, observation):
+        depth = self.estimate_depth(observation)
         result = self.frontier_extractor(
             rgb_input=observation.rgb,
             depth=depth,
@@ -145,12 +153,13 @@ class ExplorationWorker:
     def busy(self):
         return self.future is not None
 
-    def submit(self, observation, now, manual=False, frame_index=None):
+    def submit(self, observation, now, manual=False, frame_index=None, depth_only=False):
         if self.busy or not self.trigger.due(observation, now, manual):
             return False
         self.observation, self.frame_index = observation, frame_index
         self.future = self.executor.submit(
-            self.pipeline.process_with_visualization, observation
+            self.pipeline.process_depth if depth_only else self.pipeline.process_with_visualization,
+            observation
         )
         self.trigger.mark_submitted(observation, now)
         return True
