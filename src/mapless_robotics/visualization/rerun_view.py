@@ -9,6 +9,30 @@ from ..terminal_keyboard import TerminalKeyboard
 from .keys import action_for_key, key_name
 
 
+def segment_capsules(rr, segments, *, radius, color):
+    """Solid capsules along segments; unlike LineStrips3D they honour alpha."""
+    starts = np.asarray([start for start, _ in segments], dtype=float)
+    deltas = np.asarray([end for _, end in segments], dtype=float) - starts
+    lengths = np.linalg.norm(deltas, axis=1)
+    directions = deltas / np.maximum(lengths, 1e-9)[:, None]
+    # Shortest-arc quaternion (xyzw) rotating the capsule's +Z onto each segment.
+    quats = np.stack(
+        (-directions[:, 1], directions[:, 0], np.zeros(len(directions)),
+         1.0 + directions[:, 2]),
+        axis=1,
+    )
+    quats[quats[:, 3] < 1e-6] = (1.0, 0.0, 0.0, 0.0)  # anti-parallel to +Z
+    quats /= np.linalg.norm(quats, axis=1, keepdims=True)
+    return rr.Capsules3D(
+        lengths=lengths,
+        radii=radius,
+        translations=starts,
+        quaternions=[rr.Quaternion(xyzw=q) for q in quats],
+        colors=[color],
+        fill_mode=rr.components.FillMode.Solid,
+    )
+
+
 class RerunView:
     def __init__(
         self, *, spawn=True, enable_edge_vis=False, enable_depth_vis=True,
@@ -71,11 +95,15 @@ class RerunView:
         self.last_camera_log = now
         rr = self.rr
         rr.log("camera/rgb", rr.Image(observation.rgb).compress(jpeg_quality=85))
-        position = observation.robot_pose[:3, 3]
-        heading = -observation.robot_pose[:3, 2] * 0.5
+        # Lift the robot marker above the graph so it is not hidden under it.
+        position = observation.robot_pose[:3, 3] + np.array([0.0, 0.4, 0.0])
+        heading = -observation.robot_pose[:3, 2] * 0.6
         rr.log(
             "world/robot",
-            rr.Arrows3D(origins=[position], vectors=[heading], colors=[(30, 180, 60)]),
+            rr.Arrows3D(
+                origins=[position], vectors=[heading], colors=[(40, 230, 70)],
+                radii=0.04,
+            ),
         )
         if graph is not None and graph.ena_map is not None:
             grid, (map_x, map_z, map_theta) = graph.ena_map.get_map()
@@ -234,7 +262,7 @@ class RerunView:
                 [item["frontier"]["position"] for item in history],
                 colors=[(160, 60, 60) if item["reason"] in {"unreachable", "invalidated"}
                         else (135, 135, 135) for item in history],
-                radii=0.09,
+                radii=0.05,
                 labels=[f"F{item['frontier']['id']} {item['reason']}" for item in history],
             ))
         excluded = getattr(graph, "excluded_pose_ids", set())
@@ -281,9 +309,10 @@ class RerunView:
                 )
         if graph.frontiers:
             nodes = list(graph.frontiers.values())
+            node_colors = {}
             for is_objective, entity, objective_color, radius in (
-                (False, "world/frontiers", None, 0.13),
-                (True, "world/objective_frontier", (255, 40, 40), 0.15),
+                (False, "world/frontiers", None, 0.065),
+                (True, "world/objective_frontier", (255, 40, 40), 0.075),
             ):
                 displayed = [node for node in nodes if node.is_objective == is_objective]
                 if not displayed:
@@ -291,6 +320,7 @@ class RerunView:
                 colors, _ = u_gain_colors(displayed)
                 if objective_color is not None:
                     colors = [objective_color] * len(displayed)
+                node_colors.update(zip((node.id for node in displayed), colors))
                 rr.log(
                     entity,
                     rr.Points3D(
@@ -310,7 +340,7 @@ class RerunView:
                     ),
                 )
             frontier_arrows = [
-                (node.position, np.asarray(node.vd, dtype=float))
+                (node.position, np.asarray(node.vd, dtype=float), node_colors[node.id])
                 for node in nodes
                 if node.vd is not None
                 and np.asarray(node.vd, dtype=float).shape == (3,)
@@ -321,12 +351,12 @@ class RerunView:
                 rr.log(
                     "world/frontier_directions",
                     rr.Arrows3D(
-                        origins=[position for position, _ in frontier_arrows],
+                        origins=[position for position, _, _ in frontier_arrows],
                         vectors=[
                             direction / np.linalg.norm(direction) * 0.4
-                            for _, direction in frontier_arrows
+                            for _, direction, _ in frontier_arrows
                         ],
-                        colors=[(220, 80, 180)],
+                        colors=[color for _, _, color in frontier_arrows],
                     ),
                 )
             observed_from = [
@@ -338,7 +368,9 @@ class RerunView:
             if observed_from and self.enable_edge_vis:
                 rr.log(
                     "world/observations",
-                    rr.LineStrips3D(observed_from, colors=[(170, 170, 170)]),
+                    segment_capsules(
+                        rr, observed_from, radius=0.005, color=(170, 170, 170, 20)
+                    ),
                 )
 
     def log_return_target(self, frontier, pose, reference_rgb, *, score=None,
@@ -391,3 +423,8 @@ class RerunView:
         """Remove the previous return markers and reference image."""
         for entity in ("world/return_target", "return_target"):
             self.rr.log(entity, self.rr.Clear(recursive=True))
+
+    def clear_route_overlay(self):
+        """Remove LoTIS's projected route from the live camera view."""
+        for entity in ("camera/points", "camera/lines"):
+            self.rr.log(entity, self.rr.Clear(recursive=False))

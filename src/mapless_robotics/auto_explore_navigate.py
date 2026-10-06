@@ -180,11 +180,14 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
             view.rr.log('goal', view.rr.Image(goal).compress(jpeg_quality=90))
             print(f'LoTIS {tracking} to frame '
                   f'{frame_ids[0] if tracking == "backward" else frame_ids[-1]}; press q to stop')
-            return drive(
-                sim, agent, method, target_position, None, graph,
-                graph_output, view, keyboard, args.max_steps, step_velocity, turned,
-                goal_yaw=target_yaw, turn_around=turn, goal_radius=1.0, initial_yaw=initial_yaw,
-            )
+            try:
+                return drive(
+                    sim, agent, method, target_position, None, graph,
+                    graph_output, view, keyboard, args.max_steps, step_velocity, turned,
+                    goal_yaw=target_yaw, turn_around=turn, goal_radius=1.0, initial_yaw=initial_yaw,
+                )
+            finally:
+                view.clear_route_overlay()
 
         common, forward = route.connection(target_pose.frame_index)
         common_pose = next((pose for pose in graph.poses.values()
