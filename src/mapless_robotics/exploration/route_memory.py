@@ -16,7 +16,8 @@ class FrontierMemoryGraph(ExplorationGraph):
 
     Selection uses peak observed gain (the reduced detector's available score),
     independent of distance. Ordinary graph utility decay would erase historical
-    alternatives, so this launcher handles arrivals itself.
+    alternatives, so only frontiers a new pose is within ``visited_distance`` of
+    are retired; the launcher handles arrival at the objective itself.
     """
 
     def __init__(self, *args, **kwargs):
@@ -28,7 +29,15 @@ class FrontierMemoryGraph(ExplorationGraph):
         self.objective_check = {}
 
     def _apply_pose_visit(self, pose):
-        pass
+        # Distance only: occupancy coverage would retire alternatives that were
+        # merely seen. Retiring keeps passed frontiers from being re-detected.
+        frontiers = [node for node in self.frontiers.values() if not node.is_objective]
+        if not frontiers:
+            return
+        visited = self.test_visit(pose.pose[:3, 3], None, [node.position for node in frontiers])
+        for node, passed in zip(frontiers, visited):
+            if passed:
+                self.retire(node, 'passed')
 
     def eval_objective(self, pose, look_ahead_vector):
         return self.objective_frontier
