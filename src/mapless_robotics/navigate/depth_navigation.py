@@ -19,8 +19,9 @@ class DepthNavigation:
         self,
         history_size=5,
         positive_delta=0.4,
-        negative_delta=0.8,
+        negative_delta=1.2,
         occupancy_resolution=0.1,
+        map_padding=0.6,
         max_depth=5.0,
         linear_speed=0.25,
         angular_gain=1.5,
@@ -35,6 +36,8 @@ class DepthNavigation:
             raise ValueError("history_size must be positive")
         if vertical_axis not in {"x", "y", "z"}:
             raise ValueError("vertical_axis must be 'x', 'y', or 'z'")
+        if not np.isfinite(map_padding) or map_padding < 0:
+            raise ValueError("map_padding must be finite and non-negative")
         values = (positive_delta, negative_delta, occupancy_resolution, max_depth,
                   linear_speed, angular_gain, max_angular_speed, goal_tolerance,
                   heading_tolerance)
@@ -44,6 +47,7 @@ class DepthNavigation:
         self.positive_delta = float(positive_delta)
         self.negative_delta = float(negative_delta)
         self.resolution = float(occupancy_resolution)
+        self.map_padding = float(map_padding)
         self.max_depth = float(max_depth)
         self.linear_speed = float(linear_speed)
         self.angular_gain = float(angular_gain)
@@ -53,7 +57,7 @@ class DepthNavigation:
         self.vertical_index = {"x": 0, "y": 1, "z": 2}[vertical_axis]
         self.plane_indices = [i for i in range(3) if i != self.vertical_index]
         self.camera_intrinsics = camera_intrinsics
-        self.planner = planner or AStarPlanner(self.resolution, self.plane_indices, inflation_radius=0.1)
+        self.planner = planner or AStarPlanner(self.resolution, self.plane_indices, inflation_radius=0.2)
         self.trajectory = np.zeros((0, 2), dtype=float)
         self._trajectory_index = 0
         self._frames = deque(maxlen=self.history_size)
@@ -238,15 +242,24 @@ class DepthNavigation:
         cells = np.asarray(list(self.occupancy), dtype=np.int64)
         minimum = cells.min(axis=0)
         maximum = cells.max(axis=0)
-        # Keep the current pose inside the raster, even when it lies beyond
-        # the observed obstacle bounds. A* can then start at its real cell
-        # instead of clipping it to an unrelated map edge.
+        # Keep the current pose and goal inside the raster, even when they lie
+        # beyond the observed obstacle bounds. A* can then use their real cells
+        # instead of clipping either one to an unrelated map edge.
         if self.camera_pose is not None:
             start = np.floor(
                 self.camera_pose[:3, 3][self.plane_indices] / self.resolution
             ).astype(np.int64)
             minimum = np.minimum(minimum, start)
             maximum = np.maximum(maximum, start)
+        if self.goal is not None:
+            goal = np.floor(
+                self.goal[self.plane_indices] / self.resolution
+            ).astype(np.int64)
+            minimum = np.minimum(minimum, goal)
+            maximum = np.maximum(maximum, goal)
+        padding_cells = int(np.ceil(self.map_padding / self.resolution))
+        minimum -= padding_cells
+        maximum += padding_cells
         grid = np.zeros(tuple(maximum - minimum + 1), dtype=np.uint8)
         indices = cells - minimum
         grid[indices[:, 0], indices[:, 1]] = 255
