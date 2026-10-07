@@ -91,6 +91,8 @@ class ExplorationPipeline:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
             invalid = cv2.dilate(invalid, kernel)
             mask = (invalid == 0).astype(np.uint8)
+            # If any pixel in a column is invalid, exclude the whole column.
+            mask[:, np.any(mask == 0, axis=0)] = 0
         else:
             mask = None
         result = self.frontier_extractor(
