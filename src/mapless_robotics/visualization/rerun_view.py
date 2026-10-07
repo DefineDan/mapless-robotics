@@ -44,6 +44,7 @@ class RerunView:
         self.rr = rr
         self.step = 0
         self.last_camera_log = -float("inf")
+        self.paused = False
         self.enable_edge_vis = enable_edge_vis
         self.enable_depth_vis = enable_depth_vis
         self.enable_navigation_points_vis = enable_navigation_points_vis
@@ -85,11 +86,24 @@ class RerunView:
     def set_status(self, status):
         self.status = status
 
+    def set_paused(self, paused):
+        self.paused = paused
+        print(f"RerunView paused={self.paused}")
+
+    def log(self, entity, data, **kwargs):
+        if self.paused:
+            return
+        self.rr.log(entity, data, **kwargs)
+
     def start_step(self):
+        if self.paused:
+            return
         self.rr.set_time("frame", sequence=self.step)
         self.step += 1
 
     def log_camera(self, observation, now, *, force=False, graph=None):
+        if self.paused:
+            return
         if not force and now - self.last_camera_log < 0.1:
             return
         self.last_camera_log = now
@@ -145,6 +159,8 @@ class RerunView:
             )
 
     def log_navigation_map(self, navigator):
+        if self.paused:
+            return
         rr = self.rr
         if self.enable_navigation_points_vis:
             points = navigator.get_point_cloud()
@@ -215,6 +231,8 @@ class RerunView:
         )
 
     def log_analysis(self, result, pose_id, graph):
+        if self.paused:
+            return
         rr = self.rr
         if result.frontier_analysis:
             rr.log(
@@ -377,6 +395,8 @@ class RerunView:
     def log_return_target(self, frontier, pose, reference_rgb, *, score=None,
                           status="Returning"):
         """Mark the frontier and the saved viewpoint LoTIS must reach first."""
+        if self.paused:
+            return
         rr = self.rr
         self.clear_return_target()
         viewpoint = np.asarray(pose.pose)[:3, 3]
@@ -422,10 +442,14 @@ class RerunView:
 
     def clear_return_target(self):
         """Remove the previous return markers and reference image."""
+        if self.paused:
+            return
         for entity in ("world/return_target", "return_target"):
             self.rr.log(entity, self.rr.Clear(recursive=True))
 
     def clear_route_overlay(self):
         """Remove LoTIS's projected route from the live camera view."""
+        if self.paused:
+            return
         for entity in ("camera/points", "camera/lines"):
             self.rr.log(entity, self.rr.Clear(recursive=False))

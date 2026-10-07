@@ -118,6 +118,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                     selection_pending = True
                     discovery_done = False
                     force_analysis = True
+
                 view.log_analysis(result, pose_id, graph)
                 graph.save(graph_output)
                 objective = graph.objective_frontier
@@ -126,6 +127,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                                        result.observation.camera_pose)
         except Exception:
             paused = True
+            view.set_paused(paused)
             if scan is not None:
                 scan.waiting_frame = None
             worker.trigger.mode = 'manual'
@@ -177,7 +179,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                         break
             encode_route(method, frames, tracking, positions=[route.states[index].position for index in compact_ids])
             goal = frames[0] if tracking == 'backward' else frames[-1]
-            view.rr.log('goal', view.rr.Image(goal).compress(jpeg_quality=90))
+            view.log('goal', view.rr.Image(goal).compress(jpeg_quality=90))
             print(f'LoTIS {tracking} to frame '
                   f'{frame_ids[0] if tracking == "backward" else frame_ids[-1]}; press q to stop')
             try:
@@ -210,6 +212,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
         if not success:
             recovery = (target_pose, reason)
             paused = True
+            view.set_paused(paused)
             if objective is not None:
                 view.log_return_target(
                     objective, target_pose, route.frames[target_pose.frame_index],
@@ -225,6 +228,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
         recovery = None
         forward_retry = None
         paused = False
+        view.set_paused(paused)
         next_control = 0.0
         force_analysis = True
         # Start local navigation immediately with live Habitat depth. Estimated
@@ -251,7 +255,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
         if recovery is None and changed_enough(
                 state, route.states[route.active[-1]] if route.active else None, turned):
             index = route.append(observation.rgb, state)
-            view.rr.log('last_recorded_frame', view.rr.Image(route.frames[index]))
+            view.log('last_recorded_frame', view.rr.Image(route.frames[index]))
         collect()
         key = keyboard.poll()
         if key in QUIT:
@@ -271,6 +275,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
             continue
         if key == ord(' ') and recovery is None:
             paused = not paused
+            view.set_paused(paused)
             print('Paused' if paused else 'Resumed')
             if not paused and graph.objective_frontier is None:
                 force_analysis = True
@@ -294,6 +299,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
         action = action_for_key(key_name(key))
         if action is not None:
             paused = True
+            view.set_paused(paused)
             scan = None
             scan_requested = False
             discovery_done = False
@@ -312,6 +318,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 scan = None
                 if graph.best_saved(route.available_frames) is None:
                     paused = True
+                    view.set_paused(paused)
                     print('Scan finished with no available frontier; paused. '
                           'Move to another viewpoint, then Space to scan again')
             else:
@@ -324,7 +331,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 elif angular and now >= next_control:
                     navigator.get_sim_action(0.0, angular, args.integration_time)(sim)
                     next_control = now + args.integration_time
-                view.rr.log('pipeline/status', view.rr.TextDocument(
+                view.log('pipeline/status', view.rr.TextDocument(
                     f'Scanning: {scan.completed_views}/{scan.views} directions analyzed'))
                 continue
         objective = graph.objective_frontier
@@ -384,7 +391,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 navigator.get_sim_action(linear, angular, args.integration_time)(sim)
                 view.log_navigation_map(navigator)
             next_control = now + args.integration_time
-        view.rr.log('pipeline/status', view.rr.TextDocument(
+        view.log('pipeline/status', view.rr.TextDocument(
             f"{'Paused' if paused else 'Exploring'} | "
             f"goal {f'F{objective.id}' if objective else 'none'} | "
             f'{len(route.active)} retrieval frames | '
