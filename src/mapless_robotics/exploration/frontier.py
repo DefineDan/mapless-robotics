@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 
 OPENFRONTIER_ROOT = Path(__file__).resolve().parents[3] / "external" / "OpenFrontier"
 
@@ -125,8 +126,14 @@ class FrontierExtractor:
         rgb_input: np.ndarray,
         depth: np.ndarray,
         extrinsic_camera_pos: np.ndarray,
+        mask: np.ndarray | None = None,
     ):
-        """Use an OpenCV world-to-camera extrinsic; return world-frame frontiers."""
+        """Return world-frame frontiers, optionally excluding invalid pixels.
+
+        ``mask`` is a 2D validity mask aligned with ``rgb_input`` (or already
+        in processed detector coordinates). A frontier is removed when its
+        anchor pixel is zero in the mask.
+        """
         # Detect frontiers
         self.detector.detect(
             rgb=rgb_input,
@@ -140,6 +147,42 @@ class FrontierExtractor:
             depth=depth,
             extrinsic=extrinsic_camera_pos,
         )
+
+        if ft_list is not None and mask is not None:
+            mask = np.asarray(mask)
+            if mask.ndim != 2:
+                raise ValueError("mask must be a 2D array")
+            if mask.shape == rgb_input.shape[:2]:
+                # Match detector preprocessing, using nearest-neighbor so a
+                # binary validity mask stays binary through resize and crop.
+                height, width = mask.shape
+                resized = Image.fromarray(mask.astype(np.uint8)).resize(
+                    (int(width * self.detector.scale_factor),
+                     int(height * self.detector.scale_factor)),
+                    Image.Resampling.NEAREST,
+                )
+                model_width, model_height = self.detector.img_size_model
+                left = (resized.width - model_width) // 2
+                top = (resized.height - model_height) // 2
+                mask = np.asarray(
+                    resized.crop((left, top, left + model_width, top + model_height))
+                )
+            if mask.shape != self.detector.ft_region.shape:
+                raise ValueError(
+                    "mask must match rgb_input or the processed frontier map "
+                    f"{self.detector.ft_region.shape}; "
+                    f"got {mask.shape}"
+                )
+
+            height, width = mask.shape
+            ft_list = [
+                frontier
+                for frontier in ft_list
+                if mask[
+                    min(max(int(frontier.pixel_pos[1] * height), 0), height - 1),
+                    min(max(int(frontier.pixel_pos[0] * width), 0), width - 1),
+                ]
+            ]
 
         return [] if ft_list is None else ft_list
 

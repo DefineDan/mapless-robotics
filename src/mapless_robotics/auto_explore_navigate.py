@@ -25,6 +25,7 @@ from .explore_navigate import (
     make_parser as base_parser, navigate, yaw,
 )
 from .navigate.depth_navigation import DepthNavigation
+from .navigate.recovery_behaviour import RecoveryBehaviour
 from .navigate.lotis_route_policy import LoTISRoutePolicy, compact_route_ids
 from .terminal_keyboard import TerminalKeyboard
 from .visualization.keys import action_for_key, key_name
@@ -79,6 +80,7 @@ def save_run(route, graph, run_dir, graph_output):
 def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
             args, route, step_velocity, turned):
     navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
+    recovery_behaviour = RecoveryBehaviour()
     next_control = 0.0
     paused = False
     recovery = None
@@ -224,7 +226,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
         route.pending_return = False
         graph.prune_after_return(route.active, target_pose)
         restore_view(target_pose.frame_index)
-        navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
+        # navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
         recovery = None
         forward_retry = None
         paused = False
@@ -235,8 +237,8 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
         # depth is initialized by the forced capture, even in manual mode.
         current = capture(sim, agent)
         objective = graph.objective_frontier
-        if objective is not None and current.depth is not None:
-            navigator.set_data(objective.position, current.depth, current.camera_pose)
+        # if objective is not None and current.depth is not None:
+        #     navigator.set_data(objective.position, current.depth, current.camera_pose)
         view.clear_return_target()
         graph.save(graph_output)
         if worker.last_result is not None and last_pose_id is not None:
@@ -291,7 +293,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
             selection_pending = True
             force_analysis = True
             discovery_done = False
-            navigator = DepthNavigation()
+            # navigator = DepthNavigation()
             view.log_navigation_map(navigator)
             print('Goal rejected; refreshing frontiers here before considering a return')
             graph.save(graph_output)
@@ -342,7 +344,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 if objective.id in graph.frontiers:
                     graph.retire(objective, 'reached')
                 objective = None
-                navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
+                # navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
                 force_analysis = True
                 discovery_done = False
                 selection_pending = True
@@ -352,6 +354,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 selection_pending = False
             if objective is not None and objective.id != prepared_goal_id:
                 prepared_goal_id = objective.id
+                recovery_behaviour.reset()
                 target = graph.observer(objective, route.available_frames, current_position=state.position)
                 distance = np.linalg.norm((target.pose[:3, 3] - state.position)[graph.plane_idx])
                 print(f'Selected F{objective.id}, peak gain {graph.score(objective):.3f}')
@@ -366,9 +369,9 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 restore_view(target.frame_index)
                 observation = capture(sim, agent)
                 state = agent.get_state()
-                navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
-                if observation.depth is not None:
-                    navigator.set_data(objective.position, observation.depth, observation.camera_pose)
+                # navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
+                # if observation.depth is not None:
+                #     navigator.set_data(objective.position, observation.depth, observation.camera_pose)
                 force_analysis = True
         if not paused and objective is None and discovery_done and not worker.busy and scan_views > 0:
             scan_requested = True
@@ -384,9 +387,24 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                     discovery_frame = index
                     force_analysis = False
         if not paused and objective is not None and now >= next_control:
-            if observation.depth is not None:
-                navigator.set_data(objective.position, observation.depth, observation.camera_pose)
+            # if observation.depth is not None:
+            #     navigator.set_data(objective.position, observation.depth, observation.camera_pose)
             if navigator.goal is not None:
+
+                trajectory_size = navigator.get_size_trajectory()
+                if recovery_behaviour.is_stuck(observation, trajectory_size):
+                    
+                    rejected = graph.objective_frontier
+                    if rejected is not None:
+                        graph.retire(rejected, 'unreachable')
+                    route.pending_return = True
+                    selection_pending = True
+                    force_analysis = True
+                    discovery_done = False
+                    # navigator = DepthNavigation()
+                    view.log_navigation_map(navigator)
+                    print('Goal rejected; refreshing frontiers here before considering a return')
+
                 linear, angular = navigator.get_command(observation.camera_pose)
                 navigator.get_sim_action(linear, angular, args.integration_time)(sim)
                 view.log_navigation_map(navigator)
@@ -424,8 +442,11 @@ def main():
     sim = worker = method = view = None
     try:
         # Load Habitat before importing LoTIS/Triton (LLVM initialization order).
-        sim = make_sim(str(scene), with_depth=args.depth_source == 'habitat',
+
+        sim = make_sim(str(scene), with_depth=True,
                        camera_pitch=args.camera_pitch)
+        # sim = make_sim(str(scene), with_depth=args.depth_source == 'habitat',
+        #                camera_pitch=args.camera_pitch)
         if not sim.pathfinder.is_loaded:
             import habitat_sim
             settings = habitat_sim.NavMeshSettings()

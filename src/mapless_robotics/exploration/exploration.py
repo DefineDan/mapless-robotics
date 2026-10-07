@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
+import cv2
 
 from .exploration_graph import pose_matrix, ExplorationGraph
 
@@ -82,10 +83,21 @@ class ExplorationPipeline:
 
     def process(self, observation):
         depth = self.estimate_depth(observation)
+        # Captured HM3D depth uses zero for unobserved image patches. Keep
+        # frontiers anchored in observed pixels only; estimated depth has no
+        # corresponding ground-truth coverage mask.
+        if observation.depth is not None:
+            invalid = (depth == 0).astype(np.uint8)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
+            invalid = cv2.dilate(invalid, kernel)
+            mask = (invalid == 0).astype(np.uint8)
+        else:
+            mask = None
         result = self.frontier_extractor(
             rgb_input=observation.rgb,
             depth=depth,
             extrinsic_camera_pos=opencv_extrinsic(observation.camera_pose),
+            mask=mask,
         )
         return ([], depth) if result is None else (result, depth)
 

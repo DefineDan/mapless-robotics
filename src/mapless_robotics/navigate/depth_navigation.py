@@ -21,12 +21,12 @@ class DepthNavigation:
 
     def __init__(
         self,
-        history_size=10,
+        history_size=5,
         positive_delta=0.4,
         negative_delta=1.2,
         occupancy_resolution=0.1,
         map_padding=0.4,
-        unknown_cost=255.0,
+        unknown_cost=3.0,
         max_depth=5.0,
         linear_speed=0.25,
         angular_gain=1.5,
@@ -188,6 +188,10 @@ class DepthNavigation:
 
         self._trajectory_index = 0
         return self.occupancy
+
+    def get_size_trajectory(self):
+        """Return the number of waypoints in the current trajectory."""
+        return len(self.trajectory)
 
     def get_command(self, camera_pose=None):
         """Return ``(linear_velocity, angular_velocity)`` in m/s and rad/s.

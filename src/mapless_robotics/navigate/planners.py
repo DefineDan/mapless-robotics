@@ -23,15 +23,20 @@ class AStarPlanner:
         plane_indices=(0, 2),
         inflation_radius=0.0,
         unknown_cost=3.0,
+        endpoint_clearance_radius=0.3,
     ):
         self.resolution = float(resolution)
         self.plane_indices = tuple(plane_indices)
         self.inflation_radius = float(inflation_radius)
         self.unknown_cost = float(unknown_cost)
+        self.endpoint_clearance_radius = float(endpoint_clearance_radius)
         if not np.isfinite(self.inflation_radius) or self.inflation_radius < 0:
             raise ValueError("inflation_radius must be finite and non-negative")
         if not np.isfinite(self.unknown_cost) or self.unknown_cost < 1:
             raise ValueError("unknown_cost must be finite and at least 1")
+        if (not np.isfinite(self.endpoint_clearance_radius)
+                or self.endpoint_clearance_radius < 0):
+            raise ValueError("endpoint_clearance_radius must be finite and non-negative")
         self.path = np.zeros((0, 2), dtype=float)
 
 
@@ -92,10 +97,35 @@ class AStarPlanner:
             self.path = self._plane_position(goal_pose).reshape(1, 2)
             return self.path.copy()
 
-        grid = self._inflate(grid, cell_size)
-
         start = np.floor((self._plane_position(pose) - origin) / cell_size).astype(int)
         goal = np.floor((self._plane_position(goal_pose) - origin) / cell_size).astype(int)
+
+        grid = self._inflate(grid, cell_size).copy()
+        if self.endpoint_clearance_radius:
+            for endpoint in (self._plane_position(pose),
+                             self._plane_position(goal_pose)):
+                lower = np.floor(
+                    (endpoint - self.endpoint_clearance_radius - origin) / cell_size
+                ).astype(int)
+                upper = np.floor(
+                    (endpoint + self.endpoint_clearance_radius - origin) / cell_size
+                ).astype(int) + 1
+                lower = np.maximum(lower, 0)
+                upper = np.minimum(upper, grid.shape)
+                if np.any(lower >= upper):
+                    continue
+                rows, cols = np.ogrid[lower[0]:upper[0], lower[1]:upper[1]]
+                row_centers = origin[0] + (rows + 0.5) * cell_size
+                col_centers = origin[1] + (cols + 0.5) * cell_size
+                within_radius = (
+                    (row_centers - endpoint[0]) ** 2
+                    + (col_centers - endpoint[1]) ** 2
+                    <= self.endpoint_clearance_radius**2
+                )
+                grid[lower[0]:upper[0], lower[1]:upper[1]][within_radius] = 1
+
+        # import cv2
+        # cv2.imwrite("inflated.png", grid)
         traversable = grid != 255
         traversal_cost = np.where(grid == 1, 1.0, self.unknown_cost)
 
