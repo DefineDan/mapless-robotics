@@ -26,7 +26,7 @@ class DepthNavigation:
         negative_delta=1.2,
         occupancy_resolution=0.1,
         map_padding=0.4,
-        unknown_cost=3.0,
+        unknown_cost=255.0,
         max_depth=5.0,
         linear_speed=0.25,
         angular_gain=1.5,
