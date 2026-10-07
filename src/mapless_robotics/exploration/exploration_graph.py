@@ -199,6 +199,7 @@ class ExplorationGraph:
         positions = np.asarray([f.position for f in frontiers], dtype=float)
 
         if self.ena_map is not None:
+            print(f'Test')
             visited = self.ena_map.is_occupied(positions[:, self.plane_idx])
         else:
             visited = self.test_visit(robot_position, None, positions)
@@ -331,7 +332,7 @@ class ExplorationGraph:
         # earlier camera pose when occupancy mapping is disabled).
         if frontier.pose6d is not None:
             if self.ena_map is not None:
-                if self.ena_map.is_occupied(frontier.pose6d[[0, 2], 3])[0]:
+                if self.ena_map.is_occupied(frontier.pose6d[[self.idx_upward], 3])[0]:
                     return False
             else:
                 camera_poses = [p.camera_pose for p in self.poses.values() if p.camera_pose is not None]

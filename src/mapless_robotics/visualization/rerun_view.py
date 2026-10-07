@@ -88,7 +88,6 @@ class RerunView:
 
     def set_paused(self, paused):
         self.paused = paused
-        print(f"RerunView paused={self.paused}")
 
     def log(self, entity, data, **kwargs):
         if self.paused:
@@ -148,6 +147,31 @@ class RerunView:
                     colormap=rr.components.Colormap.RvizMap,
                     opacity=0.75,
                 ),
+            )
+            # Mark each graph frontier at the center of its map cell. A point
+            # radius of half a cell makes the markers read as individual map
+            # pixels while keeping the overlay registered to the raster.
+            resolution = graph.ena_map.resolution
+            frontier_cells = []
+            for frontier in graph.frontiers.values():
+                position = np.asarray(frontier.position, dtype=float)
+                if position.shape != (3,) or not np.isfinite(position).all():
+                    continue
+                col = int(np.floor((position[0] - map_x) / resolution))
+                row = int(np.floor((position[2] - map_z) / resolution))
+                if 0 <= col < width and 0 <= row < height:
+                    frontier_cells.append(
+                        [map_x + (col + 0.5) * resolution,
+                         0.01,
+                         map_z + (row + 0.5) * resolution]
+                    )
+            rr.log(
+                "world/exploration_map/frontiers",
+                rr.Points3D(
+                    frontier_cells,
+                    colors=[(0, 255, 0)],
+                    radii=resolution * 0.5,
+                ) if frontier_cells else rr.Clear(recursive=True),
             )
             rr.log(
                 "world/exploration_map_info",

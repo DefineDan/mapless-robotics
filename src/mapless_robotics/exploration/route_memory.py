@@ -34,7 +34,13 @@ class FrontierMemoryGraph(ExplorationGraph):
         frontiers = [node for node in self.frontiers.values() if not node.is_objective]
         if not frontiers:
             return
-        visited = self.test_visit(pose.pose[:3, 3], None, [node.position for node in frontiers])
+
+        positions = np.asarray([f.position for f in frontiers], dtype=float)
+        if self.ena_map is not None:
+            visited = self.ena_map.is_occupied(positions[:, self.plane_idx])
+        else:
+            visited = self.test_visit(pose.pose[:3, 3], None, positions)
+
         for node, passed in zip(frontiers, visited):
             if passed:
                 self.retire(node, 'passed')

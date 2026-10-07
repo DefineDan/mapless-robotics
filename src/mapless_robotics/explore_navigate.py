@@ -103,6 +103,9 @@ def changed_enough(
 ) -> bool:
     if recorded is None:
         return True
+
+    # print(np.linalg.norm(state.position - recorded.position))
+    # print(np.rad2deg(turned(state, recorded)))
     return bool(
         np.linalg.norm(state.position - recorded.position) >= distance
         or np.rad2deg(turned(state, recorded)) >= angle_degrees
