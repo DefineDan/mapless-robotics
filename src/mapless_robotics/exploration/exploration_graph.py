@@ -199,7 +199,6 @@ class ExplorationGraph:
         positions = np.asarray([f.position for f in frontiers], dtype=float)
 
         if self.ena_map is not None:
-            print(f'Test')
             visited = self.ena_map.is_occupied(positions[:, self.plane_idx])
         else:
             visited = self.test_visit(robot_position, None, positions)

@@ -34,6 +34,7 @@ class DepthEstimator:
 
         # Load depth model
         self.model = UniK3D.from_pretrained(model_name)
+        self.model.resolution_level = 6
         self.model = self.model.to(self.device)
         self.model.eval()
 

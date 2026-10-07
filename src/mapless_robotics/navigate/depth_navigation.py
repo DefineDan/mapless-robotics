@@ -21,7 +21,7 @@ class DepthNavigation:
 
     def __init__(
         self,
-        history_size=5,
+        history_size=10,
         positive_delta=0.4,
         negative_delta=1.2,
         occupancy_resolution=0.1,
@@ -182,7 +182,6 @@ class DepthNavigation:
         self.trajectory = self.planner.plan(
             self.camera_pose, self.goal, self.get_map(), resolution=self.resolution
         )
-
         if len(self.trajectory) == 0:
             print("DepthNavigation: no path found to goal")
 
