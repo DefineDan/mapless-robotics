@@ -285,6 +285,8 @@ def explore(sim, agent, method, worker, graph:ExplorationGraph, graph_output, vi
         if key == ord('g'):
             save_run(route, graph, args.run_dir, graph_output)
         if key == ord('r') and recovery is not None:
+            # Show the retried return; recover() pauses the view again on failure.
+            view.set_paused(False)
             recover(*recovery, turn_around=False)
             continue
         if key == ord(' ') and recovery is None:
