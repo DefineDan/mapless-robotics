@@ -18,7 +18,8 @@ import numpy as np
 from PIL import Image
 
 from .exploration.exploration import AnalysisTrigger, camera_intrinsics
-from .exploration.route_memory import FrontierMemoryGraph, RecordedRoute
+from .exploration.exploration_graph import ExplorationGraph
+from .exploration.route_memory import RecordedRoute
 from .exploration.view_scan import ViewScan, choose_start
 from .explore_navigate import (
     ENTER, QUIT, changed_enough, configure_view, drive, encode_route,
@@ -105,6 +106,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
             except Exception:
                 pass
         try:
+            previous_objective = graph.objective_frontier
             pose_id, result = worker.poll()
             if pose_id is not None:
                 last_pose_id = pose_id
@@ -112,8 +114,12 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                     discovery_done = True
                 if scan is not None:
                     scan.analyzed(graph.poses[pose_id].frame_index)
-                    if graph.best_saved(route.available_frames) is not None:
+                    if graph.best_saved(route.available_frames, agent.get_state().position) is not None:
                         scan = None
+                if previous_objective is not None and graph.objective_frontier is None:
+                    selection_pending = True
+                    discovery_done = False
+                    force_analysis = True
                 invalidated = graph.revalidate_objective(result)
                 if invalidated is not None:
                     print(f'F{invalidated.id} failed three quality checks; selecting from a fresh view')
@@ -153,7 +159,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
         if objective is not None:
             view.log_return_target(
                 objective, target_pose, route.frames[target_pose.frame_index],
-                score=graph.score(objective),
+                score=graph.score(objective, agent.get_state().position),
             )
             print(f'Return target: F{objective.id} via P{target_pose.id} '
                   f'(recorded frame {target_pose.frame_index})')
@@ -218,7 +224,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
             if objective is not None:
                 view.log_return_target(
                     objective, target_pose, route.frames[target_pose.frame_index],
-                    score=graph.score(objective), status='Return paused',
+                    score=graph.score(objective, agent.get_state().position), status='Return paused',
                 )
             print('Return incomplete. Press r to retry; archived routes have been retained')
             return
@@ -318,7 +324,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 print(f'Scanning {scan_views} directions before selecting a frontier')
             if scan.complete:
                 scan = None
-                if graph.best_saved(route.available_frames) is None:
+                if graph.best_saved(route.available_frames, agent.get_state().position) is None:
                     paused = True
                     view.set_paused(paused)
                     print('Scan finished with no available frontier; paused. '
@@ -338,11 +344,9 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 continue
         objective = graph.objective_frontier
         if objective is not None:
-            distance = np.linalg.norm((objective.position - state.position)[graph.plane_idx])
-            if distance <= graph.visited_distance:
+            graph.eval_objective(observation.robot_pose, observation.camera_pose)
+            if graph.objective_frontier is None:
                 collect(wait=True)
-                if objective.id in graph.frontiers:
-                    graph.retire(objective, 'reached')
                 objective = None
                 # navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
                 force_analysis = True
@@ -350,14 +354,14 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 selection_pending = True
         if not paused:
             if objective is None and (not selection_pending or discovery_done):
-                objective = graph.select_saved(route.available_frames, preferred_pose_id=last_pose_id)
+                objective = graph.select_saved(route.available_frames, state.position)
                 selection_pending = False
             if objective is not None and objective.id != prepared_goal_id:
                 prepared_goal_id = objective.id
                 recovery_behaviour.reset()
                 target = graph.observer(objective, route.available_frames, current_position=state.position)
                 distance = np.linalg.norm((target.pose[:3, 3] - state.position)[graph.plane_idx])
-                print(f'Selected F{objective.id}, peak gain {graph.score(objective):.3f}')
+                print(f'Selected F{objective.id}, utility score {graph.score(objective, agent.get_state().position):.3f}')
                 if worker.last_result is not None and last_pose_id is not None:
                     view.log_analysis(worker.last_result, last_pose_id, graph)
                 if distance > 0.5 or route.pending_return:
@@ -429,7 +433,7 @@ def main():
         parser.error('--max-steps and --integration-time must be positive')
     try:
         scene = resolve_scene(args.scene, args.index, args.scenes_dir)
-        graph = FrontierMemoryGraph(args.merge_distance)
+        graph = ExplorationGraph(args.merge_distance, auto_select_objective=False)
         trigger = AnalysisTrigger(args.exploration, args.interval,
                                   args.movement_distance, args.movement_angle)
     except (ValueError, FileNotFoundError) as error:
