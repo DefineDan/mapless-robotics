@@ -76,7 +76,9 @@ class DepthEstimator:
             .to(self.device)
         )
 
-        depth_predictions = self.model.infer(rgb, self.camera)
+        # UniK3D mutates the camera during inference (device transfer, crop,
+        # and resize). Keep the calibrated camera unchanged across frames.
+        depth_predictions = self.model.infer(rgb, self.camera.clone())
 
         depth = depth_predictions["depth"].squeeze().cpu().numpy()
 

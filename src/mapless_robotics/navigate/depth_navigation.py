@@ -21,13 +21,13 @@ class DepthNavigation:
 
     def __init__(
         self,
-        history_size=10,
+        history_size=5,
         positive_delta=0.4,
         negative_delta=1.2,
         occupancy_resolution=0.1,
         map_padding=0.4,
         unknown_cost=3.0,
-        max_depth=5.0,
+        max_depth=2.0,
         linear_speed=0.25,
         angular_gain=1.5,
         max_angular_speed=1.0,
