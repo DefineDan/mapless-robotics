@@ -675,8 +675,34 @@ class ExplorationGraph:
         self.retired_frontiers.append({'reason': reason, 'frontier': asdict(frontier)})
         self.eliminate_frontier(frontier.id)
 
+    def calculate_distance(self, node_a_id, node_b_id):
+        """Return route distance in graph steps between two pose nodes.
+
+        Every parent-to-child edge currently costs one step. The graph is a
+        tree, so the distance is the number of edges through the common
+        ancestor.
+        """
+        if node_a_id not in self.poses or node_b_id not in self.poses:
+            raise ValueError("Both distance endpoints must be known pose nodes")
+
+        def ancestors(node_id):
+            result = {}
+            distance = 0
+            while node_id is not None:
+                result[node_id] = distance
+                node_id = self.poses[node_id].parent_id
+                distance += 1
+            return result
+
+        a_ancestors = ancestors(node_a_id)
+        b_ancestors = ancestors(node_b_id)
+        common = a_ancestors.keys() & b_ancestors.keys()
+        if not common:
+            raise ValueError("Pose nodes are not connected")
+        return min(a_ancestors[node_id] + b_ancestors[node_id] for node_id in common)
+
     def observer(self, frontier: FrontierNode, available_frames, current_position=None):
-        """Find the nearest archived valid viewpoint; prefer newer poses on ties."""
+        """Find nearest archived viewpoint and its route distance from here."""
         # Retrieval pruning does not destroy the archived route to a viewpoint.
         poses = [self.poses[obs['pose_id']] for obs in frontier.observations
                  if self.poses[obs['pose_id']].frame_index in available_frames
@@ -684,8 +710,15 @@ class ExplorationGraph:
         if not poses:
             raise ValueError(f'No archived route to F{frontier.id}')
         reference = frontier.position if current_position is None else np.asarray(current_position)
-        return min(poses, key=lambda pose: (np.linalg.norm(
+        target = min(poses, key=lambda pose: (np.linalg.norm(
             pose.pose[:3, 3][self.plane_idx] - reference[self.plane_idx]), -pose.id))
+        if current_position is None or not self.poses:
+            distance_node_to_node = 0
+        else:
+            current_node = min(self.poses.values(), key=lambda pose: np.linalg.norm(
+                pose.pose[:3, 3][self.plane_idx] - reference[self.plane_idx]))
+            distance_node_to_node = self.calculate_distance(target.id, current_node.id)
+        return target, distance_node_to_node
 
     def revalidate_objective(self, result, confirmations=3):
         """Reject repeated explicit bad matches, never a missing detection alone."""
