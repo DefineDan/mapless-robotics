@@ -78,7 +78,7 @@ def save_run(route, graph, run_dir, graph_output):
             Image.fromarray(route.frames[frame_index]).save(path)
 
 
-def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
+def explore(sim, agent, method, worker, graph:ExplorationGraph, graph_output, view, keyboard,
             args, route, step_velocity, turned):
     navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
     recovery_behaviour = RecoveryBehaviour()
@@ -354,7 +354,7 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 selection_pending = True
         if not paused:
             if objective is None and (not selection_pending or discovery_done):
-                objective = graph.select_saved(route.available_frames, state.position)
+                objective = graph.select_saved(route.available_frames, observation.camera_pose)
                 selection_pending = False
             if objective is not None and objective.id != prepared_goal_id:
                 prepared_goal_id = objective.id
@@ -496,6 +496,7 @@ def main():
         with TerminalKeyboard() as keyboard:
             found = explore(sim, agent, method, worker, graph, graph_output, view,
                             keyboard, args, route, step_velocity, turned)
+
             save_run(route, graph, args.run_dir, graph_output)
             if found and len(route.active) >= 2:
                 navigate(sim, agent, method, [route.frames[i] for i in route.active],

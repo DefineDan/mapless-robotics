@@ -309,8 +309,13 @@ def main() -> None:
             print("Loading frontier perception models...")
             worker = make_worker(args, graph, trigger)
         print(f"Loading {scene}")
+        # sim = make_sim(
+        #     str(scene), with_depth=worker is not None and args.depth_source == "habitat",
+        #     camera_pitch=args.camera_pitch,
+        # )
+
         sim = make_sim(
-            str(scene), with_depth=worker is not None and args.depth_source == "habitat",
+            str(scene), with_depth=True,
             camera_pitch=args.camera_pitch,
         )
         if not sim.pathfinder.is_loaded:
