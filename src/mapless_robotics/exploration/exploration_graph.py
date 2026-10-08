@@ -96,7 +96,7 @@ class ExplorationGraph:
         upward_pose="y",
         fusion_angle_degrees=30.0,
         visited_distance=0.5,
-        u_gain_reduction_percentage=0.9,
+        u_gain_reduction_percentage=1.0,
         u_gain_threshold=0.1,
         enable_occupancy=True,
         occupancy_ini_depth=0.1,
@@ -105,6 +105,7 @@ class ExplorationGraph:
         camera_intrinsics=None,
         val_depth_width=10,
         depth_validity_threshold=0.5,
+        auto_select_objective=True,
     ):
         if not np.isfinite(merge_distance) or merge_distance < 0:
             raise ValueError("merge_distance must be finite and nonnegative")
@@ -156,6 +157,14 @@ class ExplorationGraph:
         self.poses: dict[int, PoseNode] = {}
         self.frontiers: dict[int, FrontierNode] = {}
         self.objective_frontier: FrontierNode | None = None
+        # The automatic launcher waits for a fresh capture before choosing a
+        # goal; visitation, fusion, and arrival evaluation still use this graph.
+        self.auto_select_objective = bool(auto_select_objective)
+        self.retired_frontiers = []
+        self.excluded_pose_ids = set()
+        self._next_frontier_id = 0
+        self.path_parent_id = None
+        self.objective_check = {}
 
     def add_pose(
         self, node_id, pose, parent_id, timestamp, camera_pose=None, frame_index=None
@@ -182,6 +191,7 @@ class ExplorationGraph:
             frame_index,
         )
         self.poses[node_id] = node
+        self.path_parent_id = node_id
         if self.ena_map is not None:
             camera_view = camera_pose if camera_pose is not None else pose
             self.ena_map.add_pose(camera_view, self.camera_intrinsics)
@@ -224,7 +234,7 @@ class ExplorationGraph:
         # Eliminate below threshold
         for frontier in visited_frontiers:
             if not frontier.is_objective and frontier.u_gain < self.u_gain_threshold:
-                self.eliminate_frontier(frontier.id)
+                self.retire(frontier, 'visited')
 
     def test_visit(
         self,
@@ -275,7 +285,8 @@ class ExplorationGraph:
 
     def create_frontier(self, frontier, pose_id):
         """Convert one OpenFrontier detection into a graph-owned node."""
-        node_id = max(self.frontiers, default=-1) + 1
+        node_id = self._next_frontier_id
+        self._next_frontier_id += 1
         position = np.asarray(frontier.pos3d, dtype=float)
         gain = getattr(frontier, "gain", None)
         node = FrontierNode(
@@ -331,7 +342,7 @@ class ExplorationGraph:
         # earlier camera pose when occupancy mapping is disabled).
         if frontier.pose6d is not None:
             if self.ena_map is not None:
-                if self.ena_map.is_occupied(frontier.pose6d[[0, 2], 3])[0]:
+                if self.ena_map.is_occupied(frontier.pose6d[[self.idx_upward], 3])[0]:
                     return False
             else:
                 camera_poses = [p.camera_pose for p in self.poses.values() if p.camera_pose is not None]
@@ -444,7 +455,8 @@ class ExplorationGraph:
         if objective is None:
             return None
         objective.is_objective = False
-        return self.eliminate_frontier(objective.id)
+        self.retire(objective, 'unreachable')
+        return objective
 
     def add_frontier(self, frontier, pose_id):
         """Consume OpenFrontier's world-frame ``pos3d``; return its graph ID."""
@@ -453,14 +465,28 @@ class ExplorationGraph:
         position = np.asarray(frontier.pos3d, dtype=float)
         if position.shape != (3,) or not np.isfinite(position).all():
             raise ValueError("Frontier position must be a finite xyz vector")
-        node = self.create_frontier(frontier, pose_id)
-
-        if not self.is_frontier_valid(node, pose_id):
+        if any(np.linalg.norm(position - np.asarray(item['frontier']['position']))
+               <= max(self.merge_distance, self.visited_distance)
+               for item in self.retired_frontiers):
             return None
+        node = self.create_frontier(frontier, pose_id)
+        node.observations[0]['valid'] = self.is_frontier_valid(node, pose_id)
+
+        if not node.observations[0]['valid']:
+            return None
+
+        # Attach compatible reobservations to the stable goal. Keeping its
+        # position and effective utility avoids moving the target or undoing
+        # visit decay, and prevents a duplicate from reviving a retired goal.
+        objective = self.objective_frontier
+        if objective is not None:
+            distance, angle = self.calculate_metric_fusion(node, objective)
+            if distance <= self.merge_distance and angle <= self.fusion_angle_degrees:
+                objective.observations.extend(node.observations)
+                return objective.id
 
         matches = []
         for existing in self.frontiers.values():
-            # Keep the objective identity and target stable until it is evaluated.
             if existing.is_objective or node.is_objective:
                 continue
             distance, angle = self.calculate_metric_fusion(node, existing)
@@ -482,16 +508,25 @@ class ExplorationGraph:
             return pose
         raise ValueError("pose must be a PoseNode, 4x4 matrix, or xyz vector")
 
-    def select_frontier(self, pose):
-        """Mark and return the best frontier, balancing utility and travel distance."""
-        if not self.frontiers:
+    def score(self, frontier, pose):
+        """Current effective gain divided by one plus ground-plane distance."""
+        gain = frontier.u_gain if frontier.u_gain is not None else frontier.gain
+        if not frontier.valid_flag or gain is None or not np.isfinite(gain) or gain < 0:
+            return -np.inf
+        position = self._position_from_pose(pose)
+        distance = np.linalg.norm((frontier.position - position)[self.plane_idx])
+        return float(gain / (1.0 + distance))
+
+    def _best_frontier(self, pose, available_frames=None):
+        frontiers = list(self.frontiers.values())
+        if available_frames is not None:
+            frontiers = [node for node in frontiers if any(
+                self.poses[obs['pose_id']].frame_index in available_frames
+                and obs.get('valid', True) for obs in node.observations)]
+        if not frontiers:
             return None
 
         position = self._position_from_pose(pose)
-
-        ids = list(self.frontiers.keys())
-        frontiers = list(self.frontiers.values())
-
         # Stack frontier positions: (N, 3)
         positions = np.stack([f.position for f in frontiers])
 
@@ -503,7 +538,7 @@ class ExplorationGraph:
 
         # Valid candidates
         valid = np.isfinite(gains) & (gains >= 0)
-
+        valid &= np.asarray([f.valid_flag for f in frontiers], dtype=bool)
         if not np.any(valid):
             return None
 
@@ -513,30 +548,39 @@ class ExplorationGraph:
 
         # Score = gain / (1 + distance)
         scores = gains / (1.0 + distances)
-
-        # Ignore invalid candidates
         scores[~valid] = -np.inf
 
-        # np.argmax gives the first maximum, matching the deterministic behavior
-        # of max() when scores and distances are tied.
+        # np.argmax gives the first maximum for deterministic tie breaking.
         selected_idx = np.argmax(scores)
-        selected = frontiers[selected_idx]
-        selected.is_objective = True
-        self.objective_frontier = selected
+        return frontiers[selected_idx]
 
+    def select_frontier(self, pose, available_frames=None):
+        """Select by utility and distance, optionally requiring an archived RGB view."""
+        selected = self._best_frontier(pose, available_frames)
+        for node in self.frontiers.values():
+            node.is_objective = node is selected
+        self.objective_frontier = selected
         return selected
+
+    def best_saved(self, available_frames, pose):
+        """Find a route-backed candidate using ordinary graph utility scoring."""
+        return self._best_frontier(pose, available_frames)
+
+    def select_saved(self, available_frames, pose):
+        return self.select_frontier(pose, available_frames)
 
     def eval_objective(self, pose, look_ahead_vector):
         """Return the active objective, replacing it when reached.
 
         Reaching requires being within ``visited_distance`` and facing the
         objective within ``fusion_angle_degrees``. On arrival the old target is
-        removed, then the next target is selected; ``None`` means no target is
-        available (or no valid look-ahead direction was provided).
+        retired, then the next target is selected. With ``auto_select_objective``
+        disabled, arrival clears the objective so the launcher can refresh its
+        view before selecting. An exact positional match also counts as arrival.
         """
         objective = self.objective_frontier
         if objective is None:
-            return self.select_frontier(pose)
+            return self.select_frontier(pose) if self.auto_select_objective else None
 
         position = self._position_from_pose(pose)
         to_goal = (objective.position - position)[self.plane_idx]
@@ -550,22 +594,24 @@ class ExplorationGraph:
             raise ValueError("look_ahead_vector must have 2 or 3 components, or be a 4x4 pose")
         direction_norm = float(np.linalg.norm(direction))
         goal_norm = distance
-        if direction_norm == 0 or goal_norm == 0 or not np.isfinite(direction).all():
+        if goal_norm == 0:
+            self.retire(objective, 'reached')
+            return self.select_frontier(position) if self.auto_select_objective else None
+        if direction_norm == 0 or not np.isfinite(direction).all():
             return objective
         cosine = float(np.clip(np.dot(direction, to_goal) / (direction_norm * goal_norm), -1.0, 1.0))
         angle = float(np.degrees(np.arccos(cosine)))
-        print(f"Distance to objective: {distance:.3f}, angle to objective: {angle:.3f}")
         if distance <= self.visited_distance and angle <= self.fusion_angle_degrees:
-            self.eliminate_frontier(objective.id)
-            return self.select_frontier(position)
+            self.retire(objective, 'reached')
+            return self.select_frontier(position) if self.auto_select_objective else None
         return objective
 
     def add_frontiers_graph(
         self, frontiers, robot_pose, timestamp, camera_pose=None, frame_index=None,
         depth=None,
     ):
-        """Append a capture and link it to the last processed capture."""
-        parent_id = next(reversed(self.poses), None)
+        """Append a capture, linking to the latest capture or returned-to pose."""
+        parent_id = self.path_parent_id
         pose_id = max(self.poses, default=-1) + 1
         self.add_pose(
             pose_id, robot_pose, parent_id, timestamp, camera_pose, frame_index
@@ -586,6 +632,70 @@ class ExplorationGraph:
         )
         return pose_id
 
+    def retire(self, frontier, reason):
+        """Remove an active frontier while preserving its identity and history."""
+        if frontier.id not in self.frontiers:
+            return
+        frontier.is_objective = False
+        self.retired_frontiers.append({'reason': reason, 'frontier': asdict(frontier)})
+        self.eliminate_frontier(frontier.id)
+
+    def observer(self, frontier, available_frames, current_position=None):
+        """Find the nearest archived valid viewpoint; prefer newer poses on ties."""
+        # Retrieval pruning does not destroy the archived route to a viewpoint.
+        poses = [self.poses[obs['pose_id']] for obs in frontier.observations
+                 if self.poses[obs['pose_id']].frame_index in available_frames
+                 and obs.get('valid', True)]
+        if not poses:
+            raise ValueError(f'No archived route to F{frontier.id}')
+        reference = frontier.position if current_position is None else np.asarray(current_position)
+        return min(poses, key=lambda pose: (np.linalg.norm(
+            pose.pose[:3, 3][self.plane_idx] - reference[self.plane_idx]), -pose.id))
+
+    def revalidate_objective(self, result, confirmations=3):
+        """Reject repeated explicit bad matches, never a missing detection alone."""
+        objective = self.objective_frontier
+        if objective is None or not result.frontier_analysis:
+            return None
+        if np.linalg.norm((result.observation.robot_pose[:3, 3]
+                           - objective.position)[self.plane_idx]) <= self.visited_distance:
+            self.objective_check = dict(frontier_id=objective.id, status='at_goal', invalid_count=0)
+            return None
+        previous = self.objective_check
+        count = previous.get('invalid_count', 0) if previous.get('frontier_id') == objective.id else 0
+        matches = [frontier for frontier in result.frontiers
+                   if np.shape(frontier.pos3d) == (3,)
+                   and np.isfinite(frontier.pos3d).all()
+                   and np.linalg.norm(np.asarray(frontier.pos3d) - objective.position)
+                   <= max(self.merge_distance, self.visited_distance)]
+        match = min(matches, key=lambda frontier: np.linalg.norm(
+            np.asarray(frontier.pos3d) - objective.position), default=None)
+        gain = getattr(match, 'gain', None)
+        if match is None:
+            status, count = 'not_observed', 0
+        elif (not getattr(match, 'is_valid', True) or gain is None
+              or not np.isfinite(gain) or gain < self.minimum_gain):
+            status, count = 'low_quality', count + 1
+        else:
+            status, count = 'confirmed', 0
+        self.objective_check = dict(frontier_id=objective.id, status=status,
+                                    invalid_count=count, latest_gain=(float(gain)
+                                    if gain is not None and np.isfinite(gain) else None),
+                                    timestamp=result.observation.timestamp)
+        if count >= confirmations:
+            self.retire(objective, 'invalidated')
+            return objective
+        return None
+
+    def prune_after_return(self, active_frames, target_pose):
+        """Reconnect future captures without deleting archived observation poses."""
+        retained = set(active_frames)
+        self.excluded_pose_ids = {
+            pose.id for pose in self.poses.values() if pose.frame_index not in retained}
+        self.path_parent_id = (target_pose.id if target_pose is not None else next(
+            (pose.id for pose in reversed(list(self.poses.values()))
+             if pose.frame_index in retained), None))
+
     # Names used in the architecture discussion.
     addPose = add_pose
     addFrontier = add_frontier
@@ -596,6 +706,15 @@ class ExplorationGraph:
             "schema_version": 1,
             "world_frame": "Habitat: X right, Y up, camera forward -Z; metres",
             "merge_distance": self.merge_distance,
+            "auto_select_objective": self.auto_select_objective,
+            "pipeline_memory": _json_value({
+                "retired_frontiers": self.retired_frontiers,
+                "excluded_pose_ids": sorted(self.excluded_pose_ids),
+                "path_parent_id": self.path_parent_id,
+                "next_frontier_id": self._next_frontier_id,
+                "score": "effective gain / (1 + ground-plane distance)",
+                "objective_check": self.objective_check,
+            }),
             "frontier_settings": {
                 "minimum_gain": self.minimum_gain,
                 "maximum_parent_distance": self.maximum_parent_distance,
@@ -605,6 +724,13 @@ class ExplorationGraph:
                 "visited_distance": self.visited_distance,
                 "u_gain_reduction_percentage": self.u_gain_reduction_percentage,
                 "u_gain_threshold": self.u_gain_threshold,
+                "enable_occupancy": self.enable_occupancy,
+                "occupancy_ini_depth": self.ena_map.ini_depth if self.ena_map else 0.1,
+                "occupancy_end_depth": self.ena_map.end_depth if self.ena_map else 1.0,
+                "occupancy_resolution": self.ena_map.resolution if self.ena_map else 0.05,
+                "camera_intrinsics": _json_value(self.camera_intrinsics),
+                "val_depth_width": self.val_depth_width,
+                "depth_validity_threshold": self.depth_validity_threshold,
             },
             "poses": [_json_value(asdict(node)) for node in self.poses.values()],
             "frontiers": [
@@ -627,7 +753,8 @@ class ExplorationGraph:
         data = json.loads(Path(path).read_text())
         if data["schema_version"] != 1:
             raise ValueError("Unsupported exploration graph schema")
-        graph = cls(data["merge_distance"], **data.get("frontier_settings", {}))
+        graph = cls(data["merge_distance"], **data.get("frontier_settings", {}),
+                    auto_select_objective=data.get("auto_select_objective", True))
         for node in data["poses"]:
             graph.add_pose(
                 node["id"],
@@ -648,4 +775,13 @@ class ExplorationGraph:
             ),
             None,
         )
+        memory = data.get("pipeline_memory", {})
+        graph.retired_frontiers = memory.get("retired_frontiers", [])
+        graph.excluded_pose_ids = set(memory.get("excluded_pose_ids", []))
+        graph.objective_check = memory.get("objective_check", {})
+        graph.path_parent_id = memory.get("path_parent_id", graph.path_parent_id)
+        known_ids = [*graph.frontiers, *(item['frontier']['id']
+                     for item in graph.retired_frontiers)]
+        graph._next_frontier_id = max(memory.get("next_frontier_id", 0),
+                                      max(known_ids, default=-1) + 1)
         return graph

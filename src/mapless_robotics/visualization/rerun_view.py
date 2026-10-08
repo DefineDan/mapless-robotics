@@ -44,6 +44,7 @@ class RerunView:
         self.rr = rr
         self.step = 0
         self.last_camera_log = -float("inf")
+        self.paused = False
         self.enable_edge_vis = enable_edge_vis
         self.enable_depth_vis = enable_depth_vis
         self.enable_navigation_points_vis = enable_navigation_points_vis
@@ -85,11 +86,23 @@ class RerunView:
     def set_status(self, status):
         self.status = status
 
+    def set_paused(self, paused):
+        self.paused = paused
+
+    def log(self, entity, data, **kwargs):
+        if self.paused:
+            return
+        self.rr.log(entity, data, **kwargs)
+
     def start_step(self):
+        if self.paused:
+            return
         self.rr.set_time("frame", sequence=self.step)
         self.step += 1
 
     def log_camera(self, observation, now, *, force=False, graph=None):
+        if self.paused:
+            return
         if not force and now - self.last_camera_log < 0.1:
             return
         self.last_camera_log = now
@@ -135,6 +148,31 @@ class RerunView:
                     opacity=0.75,
                 ),
             )
+            # Mark each graph frontier at the center of its map cell. A point
+            # radius of half a cell makes the markers read as individual map
+            # pixels while keeping the overlay registered to the raster.
+            resolution = graph.ena_map.resolution
+            frontier_cells = []
+            for frontier in graph.frontiers.values():
+                position = np.asarray(frontier.position, dtype=float)
+                if position.shape != (3,) or not np.isfinite(position).all():
+                    continue
+                col = int(np.floor((position[0] - map_x) / resolution))
+                row = int(np.floor((position[2] - map_z) / resolution))
+                if 0 <= col < width and 0 <= row < height:
+                    frontier_cells.append(
+                        [map_x + (col + 0.5) * resolution,
+                         0.01,
+                         map_z + (row + 0.5) * resolution]
+                    )
+            rr.log(
+                "world/exploration_map/frontiers",
+                rr.Points3D(
+                    frontier_cells,
+                    colors=[(0, 255, 0)],
+                    radii=resolution * 0.5,
+                ) if frontier_cells else rr.Clear(recursive=True),
+            )
             rr.log(
                 "world/exploration_map_info",
                 rr.TextDocument(
@@ -145,6 +183,8 @@ class RerunView:
             )
 
     def log_navigation_map(self, navigator):
+        if self.paused:
+            return
         rr = self.rr
         if self.enable_navigation_points_vis:
             points = navigator.get_point_cloud()
@@ -180,7 +220,8 @@ class RerunView:
         # along local +Y. The X/-Z rotation below maps those axes onto Habitat
         # world X/Z, so transpose the grid and reverse its rows accordingly.
         occupancy = np.full(grid.shape, -1, dtype=np.int8)
-        occupancy[grid > 0] = 100
+        occupancy[grid == 1] = 0
+        occupancy[grid == 255] = 100
         occupancy = occupancy.T[::-1, :]
         height, width = occupancy.shape
         plane = navigator.plane_indices
@@ -214,6 +255,8 @@ class RerunView:
         )
 
     def log_analysis(self, result, pose_id, graph):
+        if self.paused:
+            return
         rr = self.rr
         if result.frontier_analysis:
             rr.log(
@@ -376,6 +419,8 @@ class RerunView:
     def log_return_target(self, frontier, pose, reference_rgb, *, score=None,
                           status="Returning"):
         """Mark the frontier and the saved viewpoint LoTIS must reach first."""
+        if self.paused:
+            return
         rr = self.rr
         self.clear_return_target()
         viewpoint = np.asarray(pose.pose)[:3, 3]
@@ -421,10 +466,14 @@ class RerunView:
 
     def clear_return_target(self):
         """Remove the previous return markers and reference image."""
+        if self.paused:
+            return
         for entity in ("world/return_target", "return_target"):
             self.rr.log(entity, self.rr.Clear(recursive=True))
 
     def clear_route_overlay(self):
         """Remove LoTIS's projected route from the live camera view."""
+        if self.paused:
+            return
         for entity in ("camera/points", "camera/lines"):
             self.rr.log(entity, self.rr.Clear(recursive=False))
