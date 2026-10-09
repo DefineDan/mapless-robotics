@@ -382,6 +382,10 @@ def drive(
             if progress_position is None or np.linalg.norm((position - progress_position)[[0, 2]]) >= 0.1:
                 progress_position = position.copy()
                 stalled_steps = 0
+            elif getattr(method, "searching", False):
+                # A deliberate spin search makes no translational progress; the policy
+                # bounds it with its own revolution and recovery limits.
+                stalled_steps = 0
             else:
                 stalled_steps += 1
                 if getattr(method, "in_tail", False) and stalled_steps >= TAIL_STALL_STEPS:
