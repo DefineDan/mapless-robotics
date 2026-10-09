@@ -1,6 +1,6 @@
 """Explore frontiers automatically, recover with LoTIS, then retrieve.
 
-Controls: u rejects a goal, Space pauses/resumes, f forces analysis, g saves,
+Controls: u rejects a frontier, o dismisses an object, Space pauses/resumes, f forces analysis, g saves,
 r retries a stopped recovery, Enter marks the object found and starts retrieval,
 q/Escape quits (during recovery it stops the return and pauses exploration).
 """
@@ -22,6 +22,10 @@ from PIL import Image
 
 from .exploration.exploration import AnalysisTrigger, camera_intrinsics
 from .exploration.exploration_graph import ExplorationGraph
+from .exploration.goal_query import MODEL as QUERY_MODEL, translate_goal
+from .exploration.object_search import (
+    DEFAULT_MODEL, ObjectSearch, ObjectSearchWorker, OWLv2Detector, approach_position,
+)
 from .exploration.route_memory import RecordedRoute
 from .exploration.view_scan import ViewScan, choose_start
 from .explore_navigate import (
@@ -73,6 +77,24 @@ def make_parser():
                         help='Viewpoint distance threshold in confidence mode (metres)')
     parser.add_argument('--distance-node-to-node-th', type=float, default=100,
                         help='Route step threshold in graph-distance mode')
+    parser.add_argument('--object-query', help='Object or functional request, e.g. "a place to sit"')
+    parser.add_argument('--no-qwen', action='store_true',
+                        help='Skip request translation and pass --object-query directly to OWLv2')
+    parser.add_argument('--query-device', choices=('cpu', 'cuda'), default='cpu',
+                        help='Device for one-time Qwen request translation (default: cpu)')
+    parser.add_argument('--object-model', default=DEFAULT_MODEL,
+                        help='OWLv2 model ID or local model directory')
+    parser.add_argument('--object-device', choices=('auto', 'cpu', 'cuda'), default='auto')
+    parser.add_argument('--object-threshold', type=float, default=0.2,
+                        help='Minimum OWLv2 detection score (default: 0.2)')
+    parser.add_argument('--object-image-size', type=int,
+                        help='OWLv2 input resolution; multiple of 16, e.g. 512 for CPU')
+    parser.add_argument('--object-confirmations', type=int, default=3,
+                        help='Consistent captures required before approaching (default: 3)')
+    parser.add_argument('--object-consistency-radius', type=float, default=0.75,
+                        help='Detection consistency radius in metres (default: 0.75)')
+    parser.add_argument('--object-stand-off', type=float, default=1.0,
+                        help='Approach distance from the object surface in metres (default: 1)')
     return parser
 
 
@@ -81,6 +103,8 @@ def save_run(route, graph, run_dir, graph_output):
     run_dir.mkdir(parents=True, exist_ok=True)
     metadata = route.to_dict()
     metadata['initialization'] = getattr(route, 'initialization', None)
+    if hasattr(route, 'object_search'):
+        metadata['object_search'] = route.object_search
     metadata['archive_directory'] = 'archive'
     metadata['retrieval_directory'] = 'frames'
     (run_dir / 'route.json').write_text(json.dumps(metadata, indent=2) + '\n')
@@ -110,6 +134,8 @@ def explore(
     route: RecordedRoute,
     step_velocity: Callable[[habitat_sim.Simulator, float, float], None],
     turned: Callable[[habitat_sim.AgentState, habitat_sim.AgentState], float],
+    object_search: ObjectSearch | None = None,
+    object_worker: ObjectSearchWorker | None = None,
 ) -> bool:
     navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
     recovery_behaviour = RecoveryBehaviour()
@@ -126,6 +152,28 @@ def explore(
     discovery_frame = None
     discovery_done = False
     selection_pending = graph.objective_frontier is None
+    object_goal = None
+    object_arrival_time = None
+    object_reached = False
+    object_frame_index = None
+
+    def object_metadata():
+        if object_search is not None:
+            route.object_search = object_search.to_dict()
+            route.object_search.update(
+                approach_position=None if object_goal is None else object_goal.tolist(),
+                reached=object_reached, observing_frame_index=object_frame_index)
+
+    def offer_analysis(observation, state, key):
+        nonlocal force_analysis, discovery_frame
+        now = time.monotonic()
+        if force_analysis or key == ord('f') or worker.trigger.due(observation, now):
+            if not worker.busy:
+                index = route.append(observation.rgb, state)
+                if worker.submit(observation, now, manual=force_analysis or key == ord('f'),
+                                 frame_index=index, depth_only=False):
+                    discovery_frame = index
+                    force_analysis = False
 
     def collect(wait=False):
         nonlocal last_pose_id, paused, discovery_done, scan, selection_pending, force_analysis
@@ -159,9 +207,14 @@ def explore(
                     force_analysis = True
 
                 view.log_analysis(result, pose_id, graph)
+                if (object_worker is not None and recovery is None
+                        and not route.pending_return and not object_reached):
+                    object_worker.submit(graph.poses[pose_id].frame_index, result)
                 graph.save(graph_output)
                 objective = graph.objective_frontier
-                if objective is not None:
+                if object_goal is not None:
+                    navigator.set_data(object_goal, result.depth, result.observation.camera_pose)
+                elif objective is not None:
                     navigator.set_data(objective.position, result.depth,
                                        result.observation.camera_pose)
         except Exception:
@@ -171,6 +224,38 @@ def explore(
                 scan.waiting_frame = None
             worker.trigger.mode = 'manual'
             logger.exception('Analysis failed; paused. Press f to retry, Space to resume')
+
+    def collect_objects():
+        nonlocal object_goal, navigator, scan, scan_requested, object_frame_index, paused
+        if object_worker is None:
+            return
+        try:
+            frame_index, result = object_worker.poll()
+            if result is None:
+                return
+            intrinsics = camera_intrinsics(
+                result.observation.rgb.shape[1], result.observation.rgb.shape[0], 90.0)
+            if recovery is None and not route.pending_return:
+                object_search.update(result, intrinsics)
+                if object_search.target is not None and object_goal is None:
+                    object_frame_index = frame_index
+                    object_goal = approach_position(object_search.target.position,
+                                                    capture(sim, agent).robot_pose,
+                                                    args.object_stand_off)
+                    navigator = DepthNavigation(goal_tolerance=0.25, max_depth=5.0,
+                                                camera_intrinsics=intrinsics)
+                    latest = worker.last_result or result
+                    navigator.set_data(object_goal, latest.depth, latest.observation.camera_pose)
+                    scan = None
+                    scan_requested = False
+                    print(f'Confirmed {object_search.target.label}; approaching '
+                          f'{object_goal.tolist()}. Press o to dismiss this object')
+            view.log_object_search(result, object_search)
+            object_metadata()
+        except Exception:
+            paused = True
+            view.set_paused(paused)
+            logger.exception('Object analysis failed; paused. Press f to retry, Space to resume')
 
     def restore_view(frame_index):
         state = agent.get_state()
@@ -185,6 +270,9 @@ def explore(
     def recover(target_pose, reason, turn_around=True):
         nonlocal recovery, paused, navigator, force_analysis, next_control, forward_retry
         route.pending_return = True
+        if object_search is not None:
+            object_search.reset_candidate()
+            object_worker.discard()
         view.log_navigation_map(DepthNavigation())
         objective = graph.objective_frontier
         if objective is not None:
@@ -316,8 +404,11 @@ def explore(
               f'{f"F{objective.id}" if objective is not None else "the next frontier"}; '
               'local depth refresh requested')
 
-    print('Auto exploration | u unreachable | Space pause | f analyze | g save | '
+    print('Auto exploration | u frontier unreachable | o dismiss object | Space pause | f analyze | g save | '
           'Enter object found/retrieve | q quit')
+    if object_search is not None:
+        print(f'OWLv2 searching for: {", ".join(object_search.labels)}; '
+              'arrival pauses for Enter/retrieval')
     while True:
         observation = capture(sim, agent)
         state = agent.get_state()
@@ -328,6 +419,7 @@ def explore(
             index = route.append(observation.rgb, state)
             view.log('last_recorded_frame', view.rr.Image(route.frames[index]))
         collect()
+        collect_objects()
         key = keyboard.poll()
         if key in QUIT:
             return False
@@ -338,6 +430,9 @@ def explore(
                 continue
             collect(wait=True)
             route.append(observation.rgb, state)
+            if object_search is not None and not object_reached:
+                object_search.status = 'Found (operator confirmed)'
+                object_metadata()
             return True
         if key == ord('g'):
             save_run(route, graph, args.run_dir, graph_output)
@@ -347,13 +442,32 @@ def explore(
             recover(*recovery, turn_around=False)
             continue
         if key == ord(' ') and recovery is None:
-            paused = not paused
+            paused = True if object_reached else not paused
             view.set_paused(paused)
             print('Paused' if paused else 'Resumed')
             if not paused and graph.objective_frontier is None:
                 force_analysis = True
                 discovery_done = False
         if recovery is not None:
+            continue
+        if key == ord('o') and object_goal is not None:
+            collect(wait=True)
+            object_worker.discard()
+            object_search.reject()
+            object_goal = None
+            object_arrival_time = None
+            object_reached = False
+            object_frame_index = None
+            paused = False
+            view.set_paused(paused)
+            navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
+            recovery_behaviour.reset()
+            view.clear_object_goal()
+            force_analysis = True
+            discovery_done = False
+            selection_pending = graph.objective_frontier is None
+            object_metadata()
+            print('Object dismissed at this position; resuming frontier exploration')
             continue
         if key == ord('u') and graph.objective_frontier is not None:
             collect(wait=True)
@@ -377,7 +491,62 @@ def explore(
             scan_requested = False
             discovery_done = False
             force_analysis = True
+            object_arrival_time = None
+            object_reached = False
+            if object_goal is not None:
+                object_search.status = 'Confirmed; approaching'
+            if object_search is not None and object_search.target is None:
+                object_search.reset_candidate()
+                object_worker.discard()
             sim.step(action)
+            continue
+        if object_goal is not None:
+            now = time.monotonic()
+            if not paused and not object_reached and now >= next_control:
+                if args.depth_source == 'habitat' and observation.depth is not None:
+                    navigator.set_data(object_goal, observation.depth, observation.camera_pose)
+                distance = np.linalg.norm((object_goal - state.position)[[0, 2]])
+                linear = angular = 0.0
+                if distance <= navigator.goal_tolerance:
+                    delta = object_search.target.position - state.position
+                    heading = np.arctan2(-delta[0], -delta[2])
+                    error = (heading - yaw(observation.robot_pose) + np.pi) % (2 * np.pi) - np.pi
+                    angular = float(np.clip(navigator.angular_gain * error,
+                                            -navigator.max_angular_speed, navigator.max_angular_speed))
+                    if abs(error) <= np.deg2rad(15):
+                        angular = 0.0
+                        if object_arrival_time is None:
+                            object_arrival_time = observation.timestamp
+                            force_analysis = True
+                            object_search.status = 'At approach point; verifying object'
+                        elif object_search.last_seen >= object_arrival_time:
+                            object_reached = True
+                            paused = True
+                            view.set_paused(paused)
+                            object_search.status = 'Found; press Enter to retrieve or o to dismiss'
+                            route.append(observation.rgb, state)
+                            print(f'Found {object_search.target.label}; paused. '
+                                  'Enter starts LoTIS retrieval, o dismisses the object')
+                    else:
+                        object_arrival_time = None
+                else:
+                    object_arrival_time = None
+                    if (navigator.goal is not None and len(navigator.trajectory)
+                            and np.linalg.norm(navigator.trajectory[-1] - object_goal[[0, 2]])
+                            <= navigator.goal_tolerance):
+                        linear, angular = navigator.get_command(observation.camera_pose)
+                        object_search.status = 'Confirmed; approaching'
+                    else:
+                        object_search.status = 'No local path to object approach; o dismisses'
+                if not paused:
+                    navigator.get_sim_action(linear, angular, args.integration_time)(sim)
+                view.log_navigation_map(navigator)
+                next_control = now + args.integration_time
+            offer_analysis(observation, state, key)
+            view.log_object_goal(object_search, object_goal)
+            object_metadata()
+            view.rr.log('pipeline/status', view.rr.TextDocument(
+                f'Object: {object_search.status} | {len(route.active)} retrieval frames'))
             continue
         if not paused and (scan_requested or scan is not None):
             if scan is None:
@@ -471,7 +640,6 @@ def explore(
 
                 trajectory_size = navigator.get_size_trajectory()
                 if recovery_behaviour.is_stuck(observation, trajectory_size):
-                    
                     rejected = graph.objective_frontier
                     if rejected is not None:
                         graph.retire(rejected, 'unreachable')
@@ -514,10 +682,23 @@ def main():
         parser.error(str(error))
     if args.scan_views == 1 or args.scan_views < 0:
         parser.error('--scan-views must be 0 (disabled) or at least 2')
+    object_search = None
+    if args.object_query is not None:
+        try:
+            object_search = ObjectSearch(args.object_query, args.object_confirmations,
+                                         args.object_consistency_radius)
+        except ValueError as error:
+            parser.error(str(error))
+        if not np.isfinite(args.object_threshold) or not 0 < args.object_threshold < 1:
+            parser.error('--object-threshold must be between 0 and 1')
+        if args.object_image_size is not None and (args.object_image_size < 32 or args.object_image_size % 16):
+            parser.error('--object-image-size must be a multiple of 16, at least 32')
+        if not np.isfinite(args.object_stand_off) or args.object_stand_off <= 0:
+            parser.error('--object-stand-off must be finite and positive')
     args.run_dir = args.run_dir or Path('runs/auto_explore_navigate') / datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')
     graph_output = args.graph_output or args.run_dir / 'graph.json'
     route = RecordedRoute()
-    sim = worker = method = view = None
+    sim = worker = object_worker = method = view = None
     try:
         # Load Habitat before importing LoTIS/Triton (LLVM initialization order).
 
@@ -549,6 +730,21 @@ def main():
                                     camera_pitch_degrees=args.camera_pitch, seed=start_seed)
         print(f'Start XYZ={position.tolist()}, yaw={heading:.1f} degrees, '
               f'camera pitch={args.camera_pitch:.1f} degrees (positive down), seed={start_seed}')
+        if object_search is not None:
+            if args.no_qwen:
+                object_search.labels = (object_search.query,)
+                print(f'Qwen disabled; OWLv2 query: {object_search.query}')
+            else:
+                import torch
+                if args.query_device == 'cpu':
+                    torch.set_num_threads(args.lotis_cpu_threads)
+                print(f'Translating "{object_search.query}" with {QUERY_MODEL} on {args.query_device}')
+                try:
+                    object_search.labels = translate_goal(object_search.query, args.query_device)
+                except ValueError as error:
+                    parser.error(str(error))
+                print(f'OWLv2 labels: {", ".join(object_search.labels)}; Qwen unloaded')
+            route.object_search = object_search.to_dict()
         worker = make_worker(args, graph, trigger)
         from .teach_repeat import load_lotis_config, step_velocity, turned
         from nav_eval.methods.lotis import LoTISNavigationMethod
@@ -564,13 +760,25 @@ def main():
         method.setup()
         method = LoTISRoutePolicy(method, max_speed=args.lotis_speed)
         print(f'LoTIS speed limit: {min(method.max_speed, method.forward_velocity):.2f} m/s')
+        if object_search is not None:
+            if args.object_device == 'cpu' or (args.object_device == 'auto' and not torch.cuda.is_available()):
+                torch.set_num_threads(args.lotis_cpu_threads)
+            print(f'Loading OWLv2 {args.object_model}')
+            detector = OWLv2Detector(
+                object_search.labels, args.object_model, args.object_device,
+                args.object_threshold, args.object_image_size)
+            object_worker = ObjectSearchWorker(detector)
+            print(f'OWLv2 device={detector.device}; independent object worker')
         view = RerunView(enable_edge_vis=True,
                          enable_navigation_points_vis=args.show_navigation_points)
-        configure_view(view)
+        configure_view(view, object_search=object_search is not None)
         with TerminalKeyboard() as keyboard:
             found = explore(sim, agent, method, worker, graph, graph_output, view,
-                            keyboard, args, route, step_velocity, turned)
+                            keyboard, args, route, step_velocity, turned, object_search, object_worker)
 
+            if object_worker is not None:
+                object_worker.close()
+                object_worker = None
             save_run(route, graph, args.run_dir, graph_output)
             if found and len(route.active) >= 2:
                 navigate(sim, agent, method, [route.frames[i] for i in route.active],
@@ -578,6 +786,8 @@ def main():
                          graph_output, view, keyboard, args.max_steps, step_velocity, turned)
     finally:
         try:
+            if object_worker is not None:
+                object_worker.close()
             if worker is not None:
                 pose_id, result = worker.close()
                 if pose_id is not None and view is not None:

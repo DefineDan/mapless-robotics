@@ -353,8 +353,80 @@ Keep the terminal focused:
 - `f`: force a capture; `g`: save frames, route metadata and the graph.
 - `r`: retry a cancelled or timed-out LoTIS return.
 - Enter: declare the object found, save the retained route, reset to the start
-  and follow it with LoTIS. Object detection remains an operator decision.
+  and follow it with LoTIS. Without `--object-query`, object detection remains
+  an operator decision.
 - Q/Escape: quit exploration/retrieval; during a LoTIS return, stop and pause.
+
+### Object search with Qwen and OWLv2
+
+Add a request to the automatic launcher:
+
+```bash
+python -m mapless_robotics.auto_explore_navigate \
+  --index 10 --depth-source habitat \
+  --dinov3-weights /path/to/dinov3_vitb16_pretrain.pth \
+  --object-query "a place to sit"
+```
+
+[Qwen/Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) translates the request
+once into short detector labels, for example `chair`, `sofa`, `bench`, and
+`stool`. Translation uses CPU by default, with thinking disabled, and releases
+the model before loading the exploration models. `--query-device cuda` runs
+this startup step on the GPU instead. The labels are printed before exploration
+and shown in Rerun; inspect them because a language model can misinterpret a
+request. This step proposes categories; it does not visually assess whether a
+particular object meets the requested function.
+
+Add `--no-qwen` to skip translation and pass the request directly to OWLv2,
+for example `--object-query "chair" --no-qwen`. Qwen is not loaded in this mode.
+
+[OWLv2](https://huggingface.co/docs/transformers/model_doc/owlv2) detects those
+labels on the original RGB captures in a separate object worker. Frontier results
+update the graph and local navigation as soon as frontier analysis finishes;
+they do not wait for object inference. OWLv2 keeps one capture in flight and
+skips submissions while busy, retaining that capture's RGB, depth, pose and
+archived frame index. Results from before recovery or manual movement are discarded.
+The default checkpoint is `google/owlv2-base-patch16-ensemble`; `--object-model`
+accepts another OWLv2 model ID or local model directory. The first run downloads
+both models and their tokenizers/processors to `models/huggingface/` (internet
+required once). LoTIS continues using the configured DINOv3 checkpoint.
+
+`--object-device auto` selects CUDA when available, otherwise CPU. CUDA object
+inference uses half precision on its own stream to reduce delays to frontier
+updates; CPU inference uses full precision. For faster
+CPU inference, try `--object-image-size 512`; a smaller input can miss small
+objects. Without the override, OWLv2 uses its native resolution. Qwen has no
+callbacks or inference during navigation. The frontier trigger, recovery rules
+and depth mask keep their existing settings; frontier analysis frequency depends
+on depth/frontier inference time and `--interval`. Both workers still share CPU
+or GPU resources, so hardware contention can affect their speed.
+
+Rerun's **Object detections** window shows labeled boxes on the exact analyzed
+capture. The graph shows depth-projected detections and a larger yellow confirmed
+object marker, with a green approach point. **Object search** shows the original
+request, translated labels, and confirmation/arrival status.
+
+By default, three distinct consecutive captures must locate a candidate within
+0.75 m, using median valid depth in the center of the box. Configure this with
+`--object-confirmations` and `--object-consistency-radius`; `--object-threshold`
+defaults to 0.2 (an uncalibrated detection score). Missing or invalid depth and
+objects beyond 5 m cannot confirm a target. Estimated depth affects the position
+accuracy. A confirmed object takes priority over frontier driving; the object
+navigator proposes a ground-plane point `--object-stand-off 1.0` m from its
+observed surface and requires a local path ending at that point. At arrival it
+faces the object, requests a fresh matching detection, and pauses. Enter starts
+the existing LoTIS retrieval. `o` dismisses the object location and resumes
+frontier exploration; a blocked approach stops movement until a usable path
+appears or the object is dismissed. `f` still requests a fresh analysis.
+
+The request, labels, target position/score, observing archive frame, approach
+point, rejected locations and arrival status are saved in `route.json` under
+`object_search`. Running without `--object-query` uses the original exploration
+flow. Tests run without downloading weights:
+
+```bash
+python -m unittest discover -s tests -p 'test_*.py'
+```
 
 The reduced OpenFrontier integration exposes gain. Fresh local candidates are
 ranked by gain in the current capture; historical fallback candidates use **peak
@@ -441,6 +513,9 @@ Forward speed tapers continuously during aligned steering corrections.
 
 Return and retrieval encodings include the recorded body positions, subsampled
 with exactly the same frame indices. Lookahead uses 0.35 m of recorded path spacing.
+Final retrieval restores the saved starting pose, then turns in place toward the
+first recorded position at least 0.15 m away, skipping stationary startup scans.
+LoTIS takes over once the heading is within the existing 20-degree alignment tolerance.
 LoTIS's distance head outputs normalized values in [0, 1]; these are used to rank
 closest frames, not interpreted as metres for this lookahead. If reference
 positions are absent, the wrapper retains its relative-distance fallback.
