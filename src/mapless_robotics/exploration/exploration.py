@@ -57,6 +57,8 @@ class AnalysisResult:
     marked_rgb: np.ndarray
     depth: np.ndarray | None = None
     frontier_analysis: bool = True
+    object_detections: tuple = ()
+    object_analysis: bool = False
 
 
 class ExplorationPipeline:
