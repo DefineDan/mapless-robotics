@@ -26,11 +26,13 @@ def choose_start(pathfinder, seed=None, position=None, heading=None):
 class ViewScan:
     """Analyze each direction while stationary before choosing a frontier."""
 
-    def __init__(self, start_yaw, views=6):
+    def __init__(self, start_yaw, views=6, full=False):
         if views < 2:
             raise ValueError('A scan needs at least two directions')
         self.start_yaw = start_yaw
         self.views = views
+        # A full scan covers every direction even after a frontier appears.
+        self.full = full
         self.completed_views = 0
         self.waiting_frame = None
 

@@ -148,7 +148,9 @@ def explore(
     prepared_goal_id = None
     scan = None
     scan_views = args.scan_views
-    scan_requested = False
+    # Look all the way around once before choosing the first frontier.
+    initial_scan = scan_views > 0 and graph.objective_frontier is None
+    scan_requested = initial_scan
     discovery_frame = None
     discovery_done = False
     selection_pending = graph.objective_frontier is None
@@ -193,7 +195,8 @@ def explore(
                     discovery_done = True
                 if scan is not None:
                     scan.analyzed(graph.poses[pose_id].frame_index)
-                    if graph.best_saved(route.available_frames, agent.get_state().position) is not None:
+                    if (not scan.full and graph.best_saved(
+                            route.available_frames, agent.get_state().position) is not None):
                         scan = None
                 if previous_objective is not None and graph.objective_frontier is None:
                     selection_pending = True
@@ -489,6 +492,7 @@ def explore(
             view.set_paused(paused)
             scan = None
             scan_requested = False
+            initial_scan = False
             discovery_done = False
             force_analysis = True
             object_arrival_time = None
@@ -551,13 +555,17 @@ def explore(
         if not paused and (scan_requested or scan is not None):
             if scan is None:
                 collect(wait=True)
-                scan = ViewScan(yaw(observation.robot_pose), scan_views)
-                # The current heading was just analyzed without candidates.
-                scan.completed_views = 1
+                scan = ViewScan(yaw(observation.robot_pose), scan_views, full=initial_scan)
+                if not initial_scan:
+                    # The current heading was just analyzed without candidates.
+                    scan.completed_views = 1
+                initial_scan = False
                 scan_requested = False
                 print(f'Scanning {scan_views} directions before selecting a frontier')
             if scan.complete:
                 scan = None
+                # Every direction is analyzed; select without another discovery frame.
+                discovery_done = True
                 if graph.best_saved(route.available_frames, agent.get_state().position) is None:
                     paused = True
                     view.set_paused(paused)
