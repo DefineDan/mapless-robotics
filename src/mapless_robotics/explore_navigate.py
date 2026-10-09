@@ -53,6 +53,7 @@ QUIT = {ord("q"), 27}
 NAVIGATE = ord("n")
 GOAL_RADIUS = 1.0  # metres
 ALIGN_TOLERANCE = np.deg2rad(20.0)
+TAIL_STALL_STEPS = 40  # steps without progress tolerated near the end of a route
 ALIGN_GAIN = 2.0  # angular velocity per radian of heading error, like LoTIS's turn_gain
 
 
@@ -98,7 +99,7 @@ def changed_enough(
     state: AgentState,
     recorded: AgentState | None,
     turned: Turned,
-    distance: float = 0.25,
+    distance: float = 0.2,
     angle_degrees: float = 15.0,
 ) -> bool:
     if recorded is None:
@@ -188,7 +189,8 @@ def subsample(frames: list[np.ndarray], max_frames: int) -> list[np.ndarray]:
 def encode_route(
     method: LoTISNavigationMethod, frames: list[np.ndarray], tracking_mode: str,
     positions: list[np.ndarray] | None = None,
-) -> None:
+) -> list[int]:
+    """Encode the route for LoTIS; returns the subsampled indices into frames."""
     indices = np.linspace(0, len(frames) - 1, min(len(frames), method.localizer.max_seq_len), dtype=int)
     if positions is not None and len(positions) != len(frames):
         raise ValueError('Route images and positions must have the same length')
@@ -201,6 +203,7 @@ def encode_route(
             "route_positions": None if positions is None else [positions[index] for index in indices],
         }
     )
+    return [int(index) for index in indices]
 
 
 def closest_pose(graph: ExplorationGraph, frontier_id: int) -> PoseNode:
@@ -274,7 +277,7 @@ def drive(
     states: list[AgentState] | None = None,
     goal_yaw: float | None = None,
     turn_around: bool = False,
-    goal_radius: float = GOAL_RADIUS,
+    goal_radius: float | None = GOAL_RADIUS,
     initial_yaw: float | None = None,
 ) -> bool:
     """Let LoTIS drive to the goal. False means cancelled or step limit reached.
@@ -313,7 +316,7 @@ def drive(
         distance = float(np.linalg.norm(
             (agent.get_state().position - goal_position)[[0, 2]]
         ))
-        if distance < goal_radius and not arrived:
+        if goal_radius is not None and distance < goal_radius and not arrived:
             if goal_yaw is None:
                 return True
             arrived = True
@@ -334,9 +337,10 @@ def drive(
                         endpoint_stalled_steps = 0
                     else:
                         endpoint_stalled_steps += 1
-                    if endpoint_stalled_steps >= 60:
-                        print(f"Visible endpoint is not converging: {distance:.2f} m from goal; stopped for retry")
-                        return False
+                    if endpoint_stalled_steps >= TAIL_STALL_STEPS:
+                        # The endpoint is in view but not getting closer: accept the arrival.
+                        print(f"Visible endpoint is not converging: {distance:.2f} m from goal; accepting")
+                        method.arrived = True
                 else:
                     endpoint_best_distance = None
                     endpoint_stalled_steps = 0
@@ -346,6 +350,14 @@ def drive(
             if getattr(method, "navigation_failed", False) is True:
                 print("LoTIS lost the reference route; stopped for retry")
                 return False
+            if getattr(method, "arrived", False) is True:
+                status = diagnostics.get('status') if isinstance(diagnostics, dict) else None
+                print(f"LoTIS reached the end of the route ({status}) in {step + 1} steps, "
+                      f"{distance:.2f} m from the goal")
+                if goal_yaw is None:
+                    return True
+                arrived = True
+                target_yaw = goal_yaw
         key = keyboard.poll(0)
         if key in QUIT:
             print("Navigation stopped")
@@ -370,14 +382,27 @@ def drive(
             if progress_position is None or np.linalg.norm((position - progress_position)[[0, 2]]) >= 0.1:
                 progress_position = position.copy()
                 stalled_steps = 0
+            elif getattr(method, "searching", False):
+                # A deliberate spin search makes no translational progress; the policy
+                # bounds it with its own revolution and recovery limits.
+                stalled_steps = 0
             else:
                 stalled_steps += 1
+                if getattr(method, "in_tail", False) and stalled_steps >= TAIL_STALL_STEPS:
+                    # Near the end of the route LoTIS rarely recovers; accept the arrival.
+                    print(f"LoTIS made no progress near the end of the route; "
+                          f"{distance:.2f} m from goal; accepting")
+                    if goal_yaw is None:
+                        return True
+                    arrived = True
+                    target_yaw = goal_yaw
+                    continue
                 if stalled_steps >= 80:
                     print(f"LoTIS return made no translational progress for 80 steps; "
                           f"{distance:.2f} m from goal; stopped for retry")
                     return False
         distance = float(np.linalg.norm((agent.get_state().position - goal_position)[[0, 2]]))
-        if distance < goal_radius: # TODO: use lotis to determine when we arrived
+        if goal_radius is not None and distance < goal_radius:
             print(f"Reached the goal in {step + 1} steps")
             if goal_yaw is None:
                 return True
