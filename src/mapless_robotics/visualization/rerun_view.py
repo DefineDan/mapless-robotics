@@ -201,14 +201,14 @@ class RerunView:
             path_points[:, navigator.plane_indices] = trajectory
             if navigator.camera_pose is not None:
                 # path_points[:, navigator.vertical_index] = navigator.camera_pose[navigator.vertical_index, 3]
-                path_points[:, navigator.vertical_index] = 0
+                path_points[:, navigator.vertical_index] = 0.05
             rr.log(
                 "world/depth_navigation_trajectory",
-                rr.LineStrips3D([path_points], colors=[(40, 220, 255)], radii=0.035),
+                rr.LineStrips3D([path_points], colors=[(40, 220, 255)]),
             )
             rr.log(
                 "world/depth_navigation_waypoints",
-                rr.Points3D(path_points, colors=[(40, 220, 255)], radii=0.05),
+                rr.Points3D(path_points, colors=[(40, 220, 255)], radii=0.02),
             )
 
         grid, origin = navigator.get_map()
@@ -322,10 +322,10 @@ class RerunView:
         if poses:
             rr.log(
                 "world/poses",
-                rr.Points3D(list(poses.values()), colors=[(35, 100, 210)], radii=0.08),
+                rr.Points3D(list(poses.values()), colors=[(35, 100, 210)], radii=0.02),
             )
             pose_directions = [
-                -np.asarray(node.pose, dtype=float)[:3, 2] * 0.4
+                -np.asarray(node.pose, dtype=float)[:3, 2] * 0.1
                 for node in visible_poses
             ]
             rr.log(
