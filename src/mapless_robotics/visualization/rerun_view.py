@@ -9,6 +9,15 @@ from ..terminal_keyboard import TerminalKeyboard
 from .keys import action_for_key, key_name
 
 
+OVERLAY_HEIGHT = 0.05
+
+def on_overlay(points, vertical_index, height=OVERLAY_HEIGHT):
+    """Copy of world points with the vertical axis set to a fixed height."""
+    points = np.array(points, dtype=float)
+    points[..., vertical_index] = height
+    return points
+
+
 def segment_capsules(rr, segments, *, radius, color):
     """Solid capsules along segments; unlike LineStrips3D they honour alpha."""
     starts = np.asarray([start for start, _ in segments], dtype=float)
@@ -46,6 +55,8 @@ class RerunView:
         self.last_camera_log = -float("inf")
         self.paused = False
         self.enable_edge_vis = enable_edge_vis
+        # Habitat is Y-up; updated from the graph in log_analysis.
+        self.vertical_index = 1
         self.enable_depth_vis = enable_depth_vis
         self.enable_navigation_points_vis = enable_navigation_points_vis
         rr.init("frontier_exploration", spawn=spawn)
@@ -201,7 +212,7 @@ class RerunView:
             path_points[:, navigator.plane_indices] = trajectory
             if navigator.camera_pose is not None:
                 # path_points[:, navigator.vertical_index] = navigator.camera_pose[navigator.vertical_index, 3]
-                path_points[:, navigator.vertical_index] = 0.05
+                path_points[:, navigator.vertical_index] = OVERLAY_HEIGHT
             rr.log(
                 "world/depth_navigation_trajectory",
                 rr.LineStrips3D([path_points], colors=[(40, 220, 255)]),
@@ -308,17 +319,19 @@ class RerunView:
                 radii=0.05,
                 labels=[f"F{item['frontier']['id']} {item['reason']}" for item in history],
             ))
+        self.vertical_index = graph.idx_upward
         excluded = getattr(graph, "excluded_pose_ids", set())
         visible_poses = [node for node in graph.poses.values() if node.id not in excluded]
         excluded_edges = [
-            [graph.poses[node.parent_id].pose[:3, 3], node.pose[:3, 3]]
+            on_overlay([graph.poses[node.parent_id].pose[:3, 3], node.pose[:3, 3]],
+                       self.vertical_index)
             for node in graph.poses.values()
             if node.id in excluded and node.parent_id in graph.poses
         ]
         if excluded_edges:
             rr.log("world/excluded_branches", rr.LineStrips3D(
                 excluded_edges, colors=[(180, 65, 65)]))
-        poses = {node.id: np.asarray(node.pose)[:3, 3] for node in visible_poses}
+        poses = {node.id: on_overlay(np.asarray(node.pose)[:3, 3], self.vertical_index) for node in visible_poses}
         if poses:
             rr.log(
                 "world/poses",
@@ -423,7 +436,7 @@ class RerunView:
             return
         rr = self.rr
         self.clear_return_target()
-        viewpoint = np.asarray(pose.pose)[:3, 3]
+        viewpoint = on_overlay(np.asarray(pose.pose)[:3, 3], self.vertical_index)
         gain_label = f" | peak gain {score:.3f}" if score is not None else ""
         rr.log(
             "world/return_target/frontier",
@@ -436,7 +449,7 @@ class RerunView:
         rr.log(
             "world/return_target/viewpoint",
             rr.Points3D(
-                [viewpoint], colors=[(40, 220, 255)], radii=0.18,
+                [viewpoint], colors=[(40, 220, 255)], radii=0.04,
                 labels=[f"{status}: P{pose.id} | frame {pose.frame_index}"],
                 show_labels=True,
             ),
@@ -451,7 +464,7 @@ class RerunView:
         rr.log(
             "world/return_target/observation",
             rr.LineStrips3D([[viewpoint, frontier.position]],
-                            colors=[(40, 220, 255)], radii=0.025),
+                            colors=[(40, 220, 255)], radii=0.0125),
         )
         rr.log("return_target/image", rr.Image(reference_rgb).compress(jpeg_quality=90))
         rr.log(
@@ -460,8 +473,32 @@ class RerunView:
                 f"{status} to P{pose.id} (recorded frame {pose.frame_index}), "
                 f"then depth navigation to F{frontier.id}{gain_label}.\n"
                 "Yellow: selected frontier. Cyan: saved return viewpoint and heading.\n"
-                "The connecting line shows which viewpoint observed the frontier."
+                "The connecting line shows which viewpoint observed the frontier.\n"
+                "Orange: backward leg along the active route. Magenta: junction. "
+                "Green: forward leg into the archived branch."
             ),
+        )
+
+    def log_return_legs(self, backward, forward, junction_frame):
+        """Draw the LoTIS return as recorded positions: backward leg, junction, forward leg."""
+        if self.paused:
+            return
+        rr = self.rr
+        backward = on_overlay(np.asarray(backward, dtype=float).reshape(-1, 3),
+                              self.vertical_index, OVERLAY_HEIGHT + 0.04)
+        forward = on_overlay(np.asarray(forward, dtype=float).reshape(-1, 3),
+                             self.vertical_index, OVERLAY_HEIGHT + 0.04)
+        for entity, points, color in (("world/return_target/backward_leg", backward, (255, 140, 30)),
+                                      ("world/return_target/forward_leg", forward, (60, 200, 90))):
+            if len(points) >= 2:
+                rr.log(entity, rr.LineStrips3D([points], colors=[color], radii=0.015))
+            else:
+                rr.log(entity, rr.Clear(recursive=False))
+        junction = backward[0] if len(backward) else forward[0]
+        rr.log(
+            "world/return_target/junction",
+            rr.Points3D([junction], colors=[(230, 60, 220)], radii=0.04,
+                        labels=[f"junction frame {junction_frame}"], show_labels=True),
         )
 
     def clear_return_target(self):

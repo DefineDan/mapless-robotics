@@ -7,12 +7,15 @@ q/Escape quits (during recovery it stops the return and pauses exploration).
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
@@ -32,6 +35,10 @@ from .terminal_keyboard import TerminalKeyboard
 from .visualization.keys import action_for_key, key_name
 from .visualization.rerun_view import RerunView
 from .walk_frontiers import capture, make_sim, make_worker, resolve_scene
+
+if TYPE_CHECKING:
+    import habitat_sim
+    from .exploration.exploration import ExplorationWorker
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +91,20 @@ def save_run(route, graph, run_dir, graph_output):
             Image.fromarray(route.frames[frame_index]).save(path)
 
 
-def explore(sim, agent, method, worker, graph:ExplorationGraph, graph_output, view, keyboard,
-            args, route, step_velocity, turned):
+def explore(
+    sim: habitat_sim.Simulator,
+    agent: habitat_sim.Agent,
+    method: LoTISRoutePolicy,
+    worker: ExplorationWorker,
+    graph: ExplorationGraph,
+    graph_output: Path,
+    view: RerunView,
+    keyboard: TerminalKeyboard,
+    args: argparse.Namespace,
+    route: RecordedRoute,
+    step_velocity: Callable[[habitat_sim.Simulator, float, float], None],
+    turned: Callable[[habitat_sim.AgentState, habitat_sim.AgentState], float],
+) -> bool:
     navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
     recovery_behaviour = RecoveryBehaviour()
     next_control = 0.0
@@ -209,6 +228,8 @@ def explore(sim, agent, method, worker, graph:ExplorationGraph, graph_output, vi
         common_pose = next((pose for pose in graph.poses.values()
                             if pose.frame_index == common), None)
         backward = route.active[route.active.index(common):]
+        view.log_return_legs([route.states[index].position for index in backward],
+                             [route.states[index].position for index in forward], common)
         retry_forward = forward_retry == target_pose.frame_index
         success = retry_forward or leg(
             backward, 'backward', route.states[common].position,
