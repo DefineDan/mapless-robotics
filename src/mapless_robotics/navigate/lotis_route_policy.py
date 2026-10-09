@@ -18,7 +18,8 @@ class VelocityCommand:
 
 
 class LoTISRoutePolicy:
-    def __init__(self, method, max_lost_steps=60, max_speed=None, lookahead_distance=0.35):
+    def __init__(self, method, max_lost_steps=60, max_speed=None, lookahead_distance=0.35,
+                 arrival_steps=3):
         self.method = method
         self.max_lost_steps = max_lost_steps
         self.max_speed = method.forward_velocity if max_speed is None else max_speed
@@ -27,6 +28,12 @@ class LoTISRoutePolicy:
         if not np.isfinite(lookahead_distance) or lookahead_distance <= 0:
             raise ValueError('LoTIS lookahead distance must be finite and positive')
         self.lookahead_distance = lookahead_distance
+        # Arrived once the endpoint is the nearest visible route frame for arrival_steps
+        # consecutive steps. LoTIS distances only rank frames; they are not metres.
+        self.arrival_steps = arrival_steps
+        self.arrival_count = 0
+        self.arrived = False
+        self.nearest_frame = None  # encoded-route index of the last localized frame
         self.route_lengths = None
         self.turning = False
         self.inference_ms = 0.
@@ -48,6 +55,9 @@ class LoTISRoutePolicy:
             self.route_lengths = np.r_[0., np.cumsum(np.linalg.norm(
                 np.diff(positions[:, [0, 2]], axis=0), axis=1))]
         self.method.reset_episode(episode)
+        self.arrival_count = 0
+        self.arrived = False
+        self.nearest_frame = None
         self.turning = False
         self.lost_steps = 0
         self.navigation_failed = False
@@ -87,6 +97,9 @@ class LoTISRoutePolicy:
         else:
             ahead = ahead[distances[ahead] >= 0.25]
         endpoint = 0 if backward else len(coords) - 1
+        self.nearest_frame = nearest
+        self.arrival_count = self.arrival_count + 1 if nearest == endpoint else 0
+        self.arrived = self.arrival_count >= self.arrival_steps
         if len(ahead):
             target = int(ahead[0])
         elif nearest == endpoint:
@@ -118,15 +131,18 @@ class LoTISRoutePolicy:
         elif abs(angle) <= np.deg2rad(20):
             self.turning = False
         linear = 0. if self.turning else speed * max(0., np.cos(angle)) ** 2
-        self.diagnostics = dict(status='endpoint_approach' if endpoint_approach else 'tracking',
-                                visible_points=len(indices),
+        status = 'arrived' if self.arrived else (
+            'endpoint_approach' if endpoint_approach else 'tracking')
+        self.diagnostics = dict(status=status, visible_points=len(indices),
                                 nearest_frame=nearest, target_frame=target,
                                 target_distance=float(distances[target]),
+                                endpoint_distance=float(distances[endpoint]),
                                 inference_ms=round(self.inference_ms, 1),
                                 linear_mps=float(linear), angular_rps=angular, turning=self.turning)
         return VelocityCommand(float(linear), angular)
 
     def search(self, status, visible_points, nearest=None):
+        self.arrival_count = 0
         self.lost_steps += 1
         self.navigation_failed = self.lost_steps >= self.max_lost_steps
         self.diagnostics = dict(status='lost_stop' if self.navigation_failed else status,

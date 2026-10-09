@@ -188,7 +188,8 @@ def subsample(frames: list[np.ndarray], max_frames: int) -> list[np.ndarray]:
 def encode_route(
     method: LoTISNavigationMethod, frames: list[np.ndarray], tracking_mode: str,
     positions: list[np.ndarray] | None = None,
-) -> None:
+) -> list[int]:
+    """Encode the route for LoTIS; returns the subsampled indices into frames."""
     indices = np.linspace(0, len(frames) - 1, min(len(frames), method.localizer.max_seq_len), dtype=int)
     if positions is not None and len(positions) != len(frames):
         raise ValueError('Route images and positions must have the same length')
@@ -201,6 +202,7 @@ def encode_route(
             "route_positions": None if positions is None else [positions[index] for index in indices],
         }
     )
+    return [int(index) for index in indices]
 
 
 def closest_pose(graph: ExplorationGraph, frontier_id: int) -> PoseNode:
@@ -274,7 +276,7 @@ def drive(
     states: list[AgentState] | None = None,
     goal_yaw: float | None = None,
     turn_around: bool = False,
-    goal_radius: float = GOAL_RADIUS,
+    goal_radius: float | None = GOAL_RADIUS,
     initial_yaw: float | None = None,
 ) -> bool:
     """Let LoTIS drive to the goal. False means cancelled or step limit reached.
@@ -313,7 +315,7 @@ def drive(
         distance = float(np.linalg.norm(
             (agent.get_state().position - goal_position)[[0, 2]]
         ))
-        if distance < goal_radius and not arrived:
+        if goal_radius is not None and distance < goal_radius and not arrived:
             if goal_yaw is None:
                 return True
             arrived = True
@@ -346,6 +348,13 @@ def drive(
             if getattr(method, "navigation_failed", False) is True:
                 print("LoTIS lost the reference route; stopped for retry")
                 return False
+            if getattr(method, "arrived", False) is True:
+                print(f"LoTIS reached the end of the route in {step + 1} steps, "
+                      f"{distance:.2f} m from the goal")
+                if goal_yaw is None:
+                    return True
+                arrived = True
+                target_yaw = goal_yaw
         key = keyboard.poll(0)
         if key in QUIT:
             print("Navigation stopped")
@@ -377,7 +386,7 @@ def drive(
                           f"{distance:.2f} m from goal; stopped for retry")
                     return False
         distance = float(np.linalg.norm((agent.get_state().position - goal_position)[[0, 2]]))
-        if distance < goal_radius: # TODO: use lotis to determine when we arrived
+        if goal_radius is not None and distance < goal_radius:
             print(f"Reached the goal in {step + 1} steps")
             if goal_yaw is None:
                 return True

@@ -42,6 +42,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Ground-truth radius in metres, consulted only after LoTIS stops a return leg without
+# signalling arrival (endpoint is the nearest visible frame, see LoTISRoutePolicy).
+ARRIVAL_BACKSTOP = 1.0  # metres
+
 
 def make_parser():
     parser = base_parser()
@@ -190,14 +194,11 @@ def explore(
                   f'(recorded frame {target_pose.frame_index})')
 
         def leg(frame_ids, tracking, target_position, target_yaw, turn):
-            observation = capture(sim, agent)
-            distance = np.linalg.norm((observation.robot_pose[:3, 3]
-                                       - target_position)[graph.plane_idx])
-            if distance <= 1.0:
-                return True
+            """Drive one leg; returns (success, frame LoTIS last localized the robot at)."""
+            endpoint = frame_ids[0] if tracking == 'backward' else frame_ids[-1]
             if len(frame_ids) < 2:
-                print('No recorded route; exploration paused')
-                return False
+                # A one-frame leg: the robot is already at that recorded frame.
+                return True, endpoint
             compact_ids = compact_route_ids(frame_ids, route.states)
             frames = [route.frames[index] for index in compact_ids]
             print(f'Return reference: {len(frame_ids)} recorded frames, {len(compact_ids)} travel frames')
@@ -210,39 +211,62 @@ def explore(
                     if np.linalg.norm(delta[[0, 2]]) >= 0.15:
                         initial_yaw = float(np.arctan2(-delta[0], -delta[2]))
                         break
-            encode_route(method, frames, tracking, positions=[route.states[index].position for index in compact_ids])
+            encoded_ids = [compact_ids[index] for index in encode_route(
+                method, frames, tracking, positions=[route.states[index].position for index in compact_ids])]
             goal = frames[0] if tracking == 'backward' else frames[-1]
             view.log('goal', view.rr.Image(goal).compress(jpeg_quality=90))
             print(f'LoTIS {tracking} to frame '
                   f'{frame_ids[0] if tracking == "backward" else frame_ids[-1]}; press q to stop')
             try:
-                return drive(
+                success = drive(
                     sim, agent, method, target_position, None, graph,
                     graph_output, view, keyboard, args.max_steps, step_velocity, turned,
-                    goal_yaw=target_yaw, turn_around=turn, goal_radius=1.0, initial_yaw=initial_yaw,
+                    goal_yaw=target_yaw, turn_around=turn, goal_radius=None,
+                    initial_yaw=initial_yaw,
                 )
             finally:
                 view.clear_route_overlay()
+            if not success:
+                observation = capture(sim, agent)
+                distance = np.linalg.norm((observation.robot_pose[:3, 3]
+                                           - target_position)[graph.plane_idx])
+                if distance > ARRIVAL_BACKSTOP:
+                    return False, None
+                print(f'LoTIS stopped without arriving; {distance:.2f} m from the goal '
+                      f'is within the backstop, accepting')
+            # Close the loop where LoTIS localized the robot, not at the nominal endpoint.
+            # Guard against a look-alike frame far along the route.
+            nearest = getattr(method, 'nearest_frame', None)
+            reached = encoded_ids[nearest] if nearest is not None else endpoint
+            gap = np.linalg.norm((route.states[reached].position
+                                  - route.states[endpoint].position)[graph.plane_idx])
+            return True, reached if gap <= 1.0 else endpoint
+
+        def pose_at(frame_index):
+            return next((pose for pose in graph.poses.values()
+                         if pose.frame_index == frame_index), None)
 
         common, forward = route.connection(target_pose.frame_index)
-        common_pose = next((pose for pose in graph.poses.values()
-                            if pose.frame_index == common), None)
+        common_pose = pose_at(common)
         backward = route.active[route.active.index(common):]
         view.log_return_legs([route.states[index].position for index in backward],
                              [route.states[index].position for index in forward], common)
         retry_forward = forward_retry == target_pose.frame_index
-        success = retry_forward or leg(
-            backward, 'backward', route.states[common].position,
-            yaw(common_pose.pose) if common_pose is not None else None, turn_around)
+        if retry_forward:
+            success, reached = True, route.active[-1]
+        else:
+            success, reached = leg(
+                backward, 'backward', route.states[common].position,
+                yaw(common_pose.pose) if common_pose is not None else None, turn_around)
         if success:
             if not retry_forward:
-                restore_view(common)
+                restore_view(reached)
             if len(forward) > 1:
-                # Keep a valid route to the junction if the forward leg is stopped.
-                route.close_loop(common, reason)
-                graph.prune_after_return(route.active, common_pose)
-                success = leg(forward, 'forward', target_pose.pose[:3, 3],
-                              yaw(target_pose.pose), False)
+                # Keep a valid route to where the backward leg ended if the forward leg is stopped.
+                route.close_loop(reached, reason)
+                graph.prune_after_return(route.active, pose_at(reached))
+                success, reached = leg(forward, 'forward', target_pose.pose[:3, 3],
+                                       yaw(target_pose.pose), False)
                 forward_retry = None if success else target_pose.frame_index
         if not success:
             recovery = (target_pose, reason)
@@ -255,10 +279,11 @@ def explore(
                 )
             print('Return incomplete. Press r to retry; archived routes have been retained')
             return
-        route.close_loop(target_pose.frame_index, reason)
+        print(f'Closed loop at frame {reached} (target {target_pose.frame_index})')
+        route.close_loop(reached, reason)
         route.pending_return = False
-        graph.prune_after_return(route.active, target_pose)
-        restore_view(target_pose.frame_index)
+        graph.prune_after_return(route.active, pose_at(reached))
+        restore_view(reached)
         # navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
         recovery = None
         forward_retry = None
