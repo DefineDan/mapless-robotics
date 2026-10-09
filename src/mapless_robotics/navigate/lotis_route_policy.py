@@ -19,7 +19,7 @@ class VelocityCommand:
 
 class LoTISRoutePolicy:
     def __init__(self, method, max_lost_steps=60, max_speed=None, lookahead_distance=0.35,
-                 arrival_steps=3):
+                 arrival_steps=3, tail_distance=1.0, tail_lost_steps=10):
         self.method = method
         self.max_lost_steps = max_lost_steps
         self.max_speed = method.forward_velocity if max_speed is None else max_speed
@@ -31,6 +31,12 @@ class LoTISRoutePolicy:
         # Arrived once the endpoint is the nearest visible route frame for arrival_steps
         # consecutive steps. LoTIS distances only rank frames; they are not metres.
         self.arrival_steps = arrival_steps
+        # In the last tail_distance of recorded route LoTIS rarely recovers once lost
+        # (backward legs lose roughly the last metre), so give up quickly and count the
+        # leg as arrived instead of searching for max_lost_steps.
+        self.tail_distance = tail_distance
+        self.tail_lost_steps = tail_lost_steps
+        self.in_tail = False
         self.arrival_count = 0
         self.arrived = False
         self.nearest_frame = None  # encoded-route index of the last localized frame
@@ -58,6 +64,8 @@ class LoTISRoutePolicy:
         self.arrival_count = 0
         self.arrived = False
         self.nearest_frame = None
+        # A route no longer than the tail starts in it, even before LoTIS localizes.
+        self.in_tail = self.route_lengths is not None and self.route_lengths[-1] <= self.tail_distance
         self.turning = False
         self.lost_steps = 0
         self.navigation_failed = False
@@ -98,6 +106,11 @@ class LoTISRoutePolicy:
             ahead = ahead[distances[ahead] >= 0.25]
         endpoint = 0 if backward else len(coords) - 1
         self.nearest_frame = nearest
+        if self.route_lengths is not None:
+            remaining = abs(self.route_lengths[endpoint] - self.route_lengths[nearest])
+            self.in_tail = remaining <= self.tail_distance
+        else:
+            self.in_tail = abs(endpoint - nearest) <= 2
         self.arrival_count = self.arrival_count + 1 if nearest == endpoint else 0
         self.arrived = self.arrival_count >= self.arrival_steps
         if len(ahead):
@@ -144,6 +157,13 @@ class LoTISRoutePolicy:
     def search(self, status, visible_points, nearest=None):
         self.arrival_count = 0
         self.lost_steps += 1
+        if self.in_tail and self.lost_steps >= self.tail_lost_steps:
+            self.arrived = True
+            self.diagnostics = dict(status='end_lost', visible_points=visible_points,
+                                    lost_steps=self.lost_steps,
+                                    inference_ms=round(self.inference_ms, 1),
+                                    linear_mps=0., angular_rps=0.)
+            return VelocityCommand(0., 0.)
         self.navigation_failed = self.lost_steps >= self.max_lost_steps
         self.diagnostics = dict(status='lost_stop' if self.navigation_failed else status,
                                 visible_points=visible_points, lost_steps=self.lost_steps,

@@ -53,6 +53,7 @@ QUIT = {ord("q"), 27}
 NAVIGATE = ord("n")
 GOAL_RADIUS = 1.0  # metres
 ALIGN_TOLERANCE = np.deg2rad(20.0)
+TAIL_STALL_STEPS = 40  # steps without progress tolerated near the end of a route
 ALIGN_GAIN = 2.0  # angular velocity per radian of heading error, like LoTIS's turn_gain
 
 
@@ -336,9 +337,10 @@ def drive(
                         endpoint_stalled_steps = 0
                     else:
                         endpoint_stalled_steps += 1
-                    if endpoint_stalled_steps >= 60:
-                        print(f"Visible endpoint is not converging: {distance:.2f} m from goal; stopped for retry")
-                        return False
+                    if endpoint_stalled_steps >= TAIL_STALL_STEPS:
+                        # The endpoint is in view but not getting closer: accept the arrival.
+                        print(f"Visible endpoint is not converging: {distance:.2f} m from goal; accepting")
+                        method.arrived = True
                 else:
                     endpoint_best_distance = None
                     endpoint_stalled_steps = 0
@@ -349,7 +351,8 @@ def drive(
                 print("LoTIS lost the reference route; stopped for retry")
                 return False
             if getattr(method, "arrived", False) is True:
-                print(f"LoTIS reached the end of the route in {step + 1} steps, "
+                status = diagnostics.get('status') if isinstance(diagnostics, dict) else None
+                print(f"LoTIS reached the end of the route ({status}) in {step + 1} steps, "
                       f"{distance:.2f} m from the goal")
                 if goal_yaw is None:
                     return True
@@ -381,6 +384,15 @@ def drive(
                 stalled_steps = 0
             else:
                 stalled_steps += 1
+                if getattr(method, "in_tail", False) and stalled_steps >= TAIL_STALL_STEPS:
+                    # Near the end of the route LoTIS rarely recovers; accept the arrival.
+                    print(f"LoTIS made no progress near the end of the route; "
+                          f"{distance:.2f} m from goal; accepting")
+                    if goal_yaw is None:
+                        return True
+                    arrived = True
+                    target_yaw = goal_yaw
+                    continue
                 if stalled_steps >= 80:
                     print(f"LoTIS return made no translational progress for 80 steps; "
                           f"{distance:.2f} m from goal; stopped for retry")
