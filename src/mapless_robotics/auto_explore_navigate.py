@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 # Ground-truth radius in metres, consulted only after LoTIS stops a return leg without
 # signalling arrival (endpoint is the nearest visible frame, see LoTISRoutePolicy).
 ARRIVAL_BACKSTOP = 1.0  # metres
+# A forced return closer than this to its target viewpoint only closes the loop, without driving.
+SKIP_RETURN_RADIUS = 0.2  # metres
 
 
 def make_parser():
@@ -246,18 +248,27 @@ def explore(
             return next((pose for pose in graph.poses.values()
                          if pose.frame_index == frame_index), None)
 
-        common, forward = route.connection(target_pose.frame_index)
-        common_pose = pose_at(common)
-        backward = route.active[route.active.index(common):]
-        view.log_return_legs([route.states[index].position for index in backward],
-                             [route.states[index].position for index in forward], common)
-        retry_forward = forward_retry == target_pose.frame_index
-        if retry_forward:
-            success, reached = True, route.active[-1]
+        # The return only matters for the route tree when the robot already stands at the
+        # viewpoint (e.g. a goal rejected right next to it): close the loop, skip driving.
+        distance = np.linalg.norm((agent.get_state().position
+                                   - target_pose.pose[:3, 3])[graph.plane_idx])
+        if distance <= SKIP_RETURN_RADIUS:
+            print(f'Already {distance:.2f} m from P{target_pose.id}; closing the loop at '
+                  f'frame {target_pose.frame_index} without driving')
+            success, reached, forward, retry_forward = True, target_pose.frame_index, [], False
         else:
-            success, reached = leg(
-                backward, 'backward', route.states[common].position,
-                yaw(common_pose.pose) if common_pose is not None else None, turn_around)
+            common, forward = route.connection(target_pose.frame_index)
+            common_pose = pose_at(common)
+            backward = route.active[route.active.index(common):]
+            view.log_return_legs([route.states[index].position for index in backward],
+                                 [route.states[index].position for index in forward], common)
+            retry_forward = forward_retry == target_pose.frame_index
+            if retry_forward:
+                success, reached = True, route.active[-1]
+            else:
+                success, reached = leg(
+                    backward, 'backward', route.states[common].position,
+                    yaw(common_pose.pose) if common_pose is not None else None, turn_around)
         if success:
             if not retry_forward:
                 restore_view(reached)

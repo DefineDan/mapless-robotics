@@ -99,7 +99,7 @@ def changed_enough(
     state: AgentState,
     recorded: AgentState | None,
     turned: Turned,
-    distance: float = 0.25,
+    distance: float = 0.2,
     angle_degrees: float = 15.0,
 ) -> bool:
     if recorded is None:
