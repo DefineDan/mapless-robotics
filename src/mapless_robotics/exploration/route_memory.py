@@ -41,8 +41,23 @@ class RecordedRoute:
     def connection(self, frame_index):
         """Return the shared viewpoint and forward leg to an archived branch."""
         path = self.path_to(frame_index)
-        common = next(index for index in reversed(path) if index in self.active)
+        active = set(self.active)
+        common = next(index for index in reversed(path) if index in active)
         return common, path[path.index(common):]
+
+    def return_length(self, frame_index):
+        """Ground-plane metres LoTIS drives back to the shared viewpoint and on to a frame."""
+        common, forward = self.connection(frame_index)
+        backward = self.active[self.active.index(common):]
+
+        def length(frame_ids):
+            if len(frame_ids) < 2:
+                return 0.0
+            positions = np.asarray([self.states[index].position for index in frame_ids],
+                                   dtype=float)[:, [0, 2]]
+            return float(np.linalg.norm(np.diff(positions, axis=0), axis=1).sum())
+
+        return length(backward) + length(forward)
 
     def backtrack(self, frame_index):
         start = self.active.index(frame_index)

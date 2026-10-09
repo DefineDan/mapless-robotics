@@ -64,7 +64,7 @@ class RecoveryBehaviour:
 def should_recover(frontier, target, current_position, *,
                     distance_node_to_node=0, mode="confidence",
                     confidence_dist_th=0.5, distance_node_to_node_th=1,
-                    plane_idx=(0, 2)):
+                    plane_idx=(0, 2), verbose=True):
     """Decide whether returning to an archived viewpoint is warranted.
 
     ``confidence`` mode recovers when the selected viewpoint is farther
@@ -82,7 +82,8 @@ def should_recover(frontier, target, current_position, *,
         current_to_frontier = np.linalg.norm((current_position - frontier_position)[plane_idx])
         target_to_frontier = np.linalg.norm((target_position - frontier_position)[plane_idx])
 
-        print(f"current_to_frontier: {current_to_frontier}, target_to_frontier: {target_to_frontier}, distance_node_to_node: {distance_node_to_node}, distance_node_to_node_th: {distance_node_to_node_th}")
+        if verbose:
+            print(f"current_to_frontier: {current_to_frontier}, target_to_frontier: {target_to_frontier}, distance_node_to_node: {distance_node_to_node}, distance_node_to_node_th: {distance_node_to_node_th}")
 
         return not (distance_node_to_node < distance_node_to_node_th
                     and current_to_frontier < target_to_frontier)

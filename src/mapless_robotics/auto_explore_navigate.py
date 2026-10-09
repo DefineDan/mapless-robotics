@@ -98,6 +98,34 @@ def make_parser():
     return parser
 
 
+def travel_plan(graph, route, frontier, position, args, verbose=False):
+    """Predict how the robot will reach ``frontier`` and the metres it will drive.
+
+    Mirrors the navigation switch: the same viewpoint and ``should_recover`` rule.
+    Returns ``(cost, direct, target, hops)``; direct plans cost the straight-line
+    distance, plans via the viewpoint cost the LoTIS return plus viewpoint to frontier.
+    """
+    position = np.asarray(position, dtype=float)
+    try:
+        target, hops = graph.observer(frontier, route.available_frames, current_position=position)
+    except ValueError:
+        return np.inf, False, None, None
+    direct = not (should_recover(
+        frontier, target, position,
+        distance_node_to_node=hops,
+        mode=args.recovery_decision_mode,
+        confidence_dist_th=args.confidence_dist_th,
+        distance_node_to_node_th=args.distance_node_to_node_th,
+        plane_idx=graph.plane_idx, verbose=verbose)
+        or route.pending_return)
+    if direct:
+        cost = np.linalg.norm((frontier.position - position)[graph.plane_idx])
+    else:
+        cost = (route.return_length(target.frame_index)
+                + np.linalg.norm((frontier.position - target.pose[:3, 3])[graph.plane_idx]))
+    return float(cost), direct, target, hops
+
+
 def save_run(route, graph, run_dir, graph_output):
     graph.save(graph_output)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -157,6 +185,9 @@ def explore(
     object_reached = False
     object_frame_index = None
 
+    def cost_fn(frontier, position):
+        return travel_plan(graph, route, frontier, position, args)[:2]
+
     def object_metadata():
         if object_search is not None:
             route.object_search = object_search.to_dict()
@@ -193,7 +224,8 @@ def explore(
                     discovery_done = True
                 if scan is not None:
                     scan.analyzed(graph.poses[pose_id].frame_index)
-                    if graph.best_saved(route.available_frames, agent.get_state().position) is not None:
+                    if graph.best_saved(route.available_frames, agent.get_state().position,
+                                       cost_fn) is not None:
                         scan = None
                 if previous_objective is not None and graph.objective_frontier is None:
                     selection_pending = True
@@ -278,7 +310,7 @@ def explore(
         if objective is not None:
             view.log_return_target(
                 objective, target_pose, route.frames[target_pose.frame_index],
-                score=graph.score(objective, agent.get_state().position),
+                score=graph.score(objective, agent.get_state().position, cost_fn),
             )
             print(f'Return target: F{objective.id} via P{target_pose.id} '
                   f'(recorded frame {target_pose.frame_index})')
@@ -374,7 +406,8 @@ def explore(
             if objective is not None:
                 view.log_return_target(
                     objective, target_pose, route.frames[target_pose.frame_index],
-                    score=graph.score(objective, agent.get_state().position), status='Return paused',
+                    score=graph.score(objective, agent.get_state().position, cost_fn),
+                    status='Return paused',
                 )
             print('Return incomplete. Press r to retry; archived routes have been retained')
             return
@@ -558,7 +591,8 @@ def explore(
                 print(f'Scanning {scan_views} directions before selecting a frontier')
             if scan.complete:
                 scan = None
-                if graph.best_saved(route.available_frames, agent.get_state().position) is None:
+                if graph.best_saved(route.available_frames, agent.get_state().position,
+                                   cost_fn) is None:
                     paused = True
                     view.set_paused(paused)
                     print('Scan finished with no available frontier; paused. '
@@ -588,26 +622,26 @@ def explore(
                 selection_pending = True
         if not paused:
             if objective is None and (not selection_pending or discovery_done):
-                objective = graph.select_saved(route.available_frames, observation.camera_pose)
+                objective = graph.select_saved(route.available_frames, observation.camera_pose, cost_fn)
                 selection_pending = False
             if objective is not None and objective.id != prepared_goal_id:
                 prepared_goal_id = objective.id
                 recovery_behaviour.reset()
-                target, distance_node_to_node = graph.observer(
-                    objective, route.available_frames, current_position=state.position)
-                print(f'Selected F{objective.id}, utility score {graph.score(objective, agent.get_state().position):.3f}')
+                cost, direct, target, hops = travel_plan(
+                    graph, route, objective, state.position, args, verbose=True)
+                if direct:
+                    plan = f'direct {cost:.2f} m'
+                else:
+                    return_length = route.return_length(target.frame_index)
+                    plan = (f'via P{target.id}: {return_length:.2f} m route '
+                            f'+ {cost - return_length:.2f} m')
+                score = graph.score(objective, observation.camera_pose, cost_fn)
+                print(f'Selected F{objective.id}, utility score {score:.3f} ({plan})')
                 if worker.last_result is not None and last_pose_id is not None:
                     view.log_analysis(worker.last_result, last_pose_id, graph)
 
-                print(f'Distance to target viewpoint: {distance_node_to_node:.3f}; ')
-                if (should_recover(
-                        objective, target, state.position,
-                        distance_node_to_node=distance_node_to_node,
-                        mode=args.recovery_decision_mode,
-                        confidence_dist_th=args.confidence_dist_th,
-                        distance_node_to_node_th=args.distance_node_to_node_th,
-                        plane_idx=graph.plane_idx)
-                        or route.pending_return):
+                print(f'Graph hops to target viewpoint: {hops}')
+                if not direct:
                     collect(wait=True)
                     recover(target, 'unreachable' if route.pending_return else 'loop_closure')
                     continue

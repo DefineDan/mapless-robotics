@@ -9,6 +9,8 @@ import numpy as np
 from .exploration_map import ExplorationMap
 
 DIRECTIONAL_REWARD = 10.0
+# Heading multiplier for plans via a recorded viewpoint: as if the frontier were 90 degrees off.
+VIA_DIRECTIONAL_REWARD = 1.0
 
 
 def _json_value(value):
@@ -510,23 +512,18 @@ class ExplorationGraph:
             return pose
         raise ValueError("pose must be a PoseNode, 4x4 matrix, or xyz vector")
 
-    def score(self, frontier, pose):
-        """Current effective gain divided by one plus ground-plane distance."""
-        gain = frontier.u_gain if frontier.u_gain is not None else frontier.gain
-        if not frontier.valid_flag or gain is None or not np.isfinite(gain) or gain < 0:
-            return -np.inf
-        position = self._position_from_pose(pose)
-        distance = np.linalg.norm((frontier.position - position)[self.plane_idx])
-        return float(gain / (1.0 + distance))
+    def score(self, frontier, pose, cost_fn=None):
+        """The utility ``_best_frontier`` ranks this frontier by from ``pose``."""
+        return float(self._utility([frontier], pose, cost_fn)[0])
 
-    def _best_frontier(self, pose, available_frames=None):
-        frontiers = list(self.frontiers.values())
-        if available_frames is not None:
-            frontiers = [node for node in frontiers if any(
-                self.poses[obs['pose_id']].frame_index in available_frames
-                and obs.get('valid', True) for obs in node.observations)]
-        if not frontiers:
-            return None
+    def _utility(self, frontiers, pose, cost_fn=None):
+        """Effective gain divided by one plus travel cost, weighted by facing alignment.
+
+        Without ``cost_fn`` the travel cost is the ground-plane distance and every
+        frontier is reached directly. ``cost_fn(frontier, position)`` returns
+        ``(cost, direct)``; only direct plans earn the heading term, plans via a
+        recorded viewpoint get the neutral ``VIA_DIRECTIONAL_REWARD``.
+        """
         position_cam = self._position_from_pose(pose)
         # Stack frontier positions: (N, 3)
         positions = np.stack([f.position for f in frontiers])
@@ -540,12 +537,19 @@ class ExplorationGraph:
         # Valid candidates
         valid = np.isfinite(gains) & (gains >= 0)
         valid &= np.asarray([f.valid_flag for f in frontiers], dtype=bool)
-        if not np.any(valid):
-            return None
 
         # Distances in the selected plane
         deltas = positions[:, self.plane_idx] - position_cam[self.plane_idx]
-        distances = np.linalg.norm(deltas, axis=1)
+        delta_norms = np.linalg.norm(deltas, axis=1)
+        if cost_fn is None:
+            costs = delta_norms
+            direct = np.ones(len(frontiers), dtype=bool)
+        else:
+            plans = [cost_fn(f, position_cam) if ok else (np.inf, False)
+                     for f, ok in zip(frontiers, valid)]
+            costs = np.asarray([cost for cost, _ in plans], dtype=float)
+            direct = np.asarray([is_direct for _, is_direct in plans], dtype=bool)
+        valid &= np.isfinite(costs) & (costs >= 0)
 
         # Prefer frontiers in the direction the camera is facing. Project both
         # vectors onto the ground plane before taking their normalized dot
@@ -559,14 +563,14 @@ class ExplorationGraph:
             if pose_array.shape == (4, 4):
                 pose_matrix_value = pose_array
 
+        directional_reward = np.ones(len(frontiers))
         if pose_matrix_value is not None:
             heading = self._camera_forward(pose_matrix_value)[self.plane_idx]
             heading_norm = np.linalg.norm(heading)
             if np.isfinite(heading_norm) and heading_norm > 0:
-                delta_norms = distances
                 # A frontier at the robot position has no defined bearing;
                 # leave its directional multiplier neutral.
-                alignment = np.ones_like(distances)
+                alignment = np.ones_like(delta_norms)
                 np.divide(
                     deltas @ (heading / heading_norm),
                     delta_norms,
@@ -575,34 +579,43 @@ class ExplorationGraph:
                 )
                 # Map cosine similarity from [-1, 1] to a [0, 1] multiplier.
                 directional_reward = (1.0 + np.clip(alignment, -1.0, 1.0)) / 2.0
-            else:
-                directional_reward = 1.0
-        else:
-            directional_reward = 1.0
+        directional_reward = np.where(direct, directional_reward, VIA_DIRECTIONAL_REWARD)
 
-        # Score = gain / (1 + distance), weighted by facing alignment.
-        scores = gains / (1.0 + distances)
-        scores *= (directional_reward * DIRECTIONAL_REWARD) 
-        scores[~valid] = -np.inf
+        # Score = gain / (1 + cost), weighted by facing alignment.
+        scores = np.full(len(frontiers), -np.inf)
+        scores[valid] = (gains[valid] / (1.0 + costs[valid])
+                         * directional_reward[valid] * DIRECTIONAL_REWARD)
+        return scores
 
+    def _best_frontier(self, pose, available_frames=None, cost_fn=None):
+        frontiers = list(self.frontiers.values())
+        if available_frames is not None:
+            frontiers = [node for node in frontiers if any(
+                self.poses[obs['pose_id']].frame_index in available_frames
+                and obs.get('valid', True) for obs in node.observations)]
+        if not frontiers:
+            return None
+        scores = self._utility(frontiers, pose, cost_fn)
+        if not np.any(np.isfinite(scores)):
+            return None
         # np.argmax gives the first maximum for deterministic tie breaking.
         selected_idx = np.argmax(scores)
         return frontiers[selected_idx]
 
-    def select_frontier(self, pose, available_frames=None):
-        """Select by utility and distance, optionally requiring an archived RGB view."""
-        selected = self._best_frontier(pose, available_frames)
+    def select_frontier(self, pose, available_frames=None, cost_fn=None):
+        """Select by utility and travel cost, optionally requiring an archived RGB view."""
+        selected = self._best_frontier(pose, available_frames, cost_fn)
         for node in self.frontiers.values():
             node.is_objective = node is selected
         self.objective_frontier = selected
         return selected
 
-    def best_saved(self, available_frames, pose):
+    def best_saved(self, available_frames, pose, cost_fn=None):
         """Find a route-backed candidate using ordinary graph utility scoring."""
-        return self._best_frontier(pose, available_frames)
+        return self._best_frontier(pose, available_frames, cost_fn)
 
-    def select_saved(self, available_frames, pose):
-        return self.select_frontier(pose, available_frames)
+    def select_saved(self, available_frames, pose, cost_fn=None):
+        return self.select_frontier(pose, available_frames, cost_fn)
 
     def eval_objective(self, pose, look_ahead_vector):
         """Return the active objective, replacing it when reached.
