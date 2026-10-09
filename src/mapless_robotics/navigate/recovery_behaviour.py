@@ -28,6 +28,7 @@ class RecoveryBehaviour:
         self.trajectory_sizes = deque(maxlen=self.max_len_size_array)
         self._is_stuck_call_count = 0
 
+
     def is_stuck(self, observation, trajectory_size):
         """Record this observation and report an empty plan or no progress.
 
@@ -57,3 +58,32 @@ class RecoveryBehaviour:
             stationary = np.linalg.norm(self.poses[-1] - center) <= self.min_distance
 
         return no_path or stationary
+
+
+
+def should_recover(frontier, target, current_position, *,
+                    distance_node_to_node=0, mode="confidence",
+                    confidence_dist_th=0.5, distance_node_to_node_th=1,
+                    plane_idx=(0, 2)):
+    """Decide whether returning to an archived viewpoint is warranted.
+
+    ``confidence`` mode recovers when the selected viewpoint is farther
+    than the confidence radius. ``graph_distance`` mode avoids recovery
+    when the viewpoint is close in route steps and the robot is closer to
+    the frontier than that viewpoint is.
+    """
+    current_position = np.asarray(current_position, dtype=float).reshape(3)
+    target_position = np.asarray(target.pose[:3, 3], dtype=float).reshape(3)
+    frontier_position = np.asarray(frontier.position, dtype=float).reshape(3)
+    if mode == "confidence":
+        distance = np.linalg.norm((target_position - current_position)[plane_idx])
+        return bool(distance > confidence_dist_th)
+    if mode == "graph_distance":
+        current_to_frontier = np.linalg.norm((current_position - frontier_position)[plane_idx])
+        target_to_frontier = np.linalg.norm((target_position - frontier_position)[plane_idx])
+
+        print(f"current_to_frontier: {current_to_frontier}, target_to_frontier: {target_to_frontier}, distance_node_to_node: {distance_node_to_node}, distance_node_to_node_th: {distance_node_to_node_th}")
+
+        return not (distance_node_to_node < distance_node_to_node_th
+                    and current_to_frontier < target_to_frontier)
+    raise ValueError("mode must be 'confidence' or 'graph_distance'")

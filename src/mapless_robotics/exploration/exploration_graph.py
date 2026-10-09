@@ -8,6 +8,8 @@ import numpy as np
 
 from .exploration_map import ExplorationMap
 
+DIRECTIONAL_REWARD = 10.0
+
 
 def _json_value(value):
     """Recursively convert numpy values when exporting the graph as JSON."""
@@ -525,8 +527,7 @@ class ExplorationGraph:
                 and obs.get('valid', True) for obs in node.observations)]
         if not frontiers:
             return None
-
-        position = self._position_from_pose(pose)
+        position_cam = self._position_from_pose(pose)
         # Stack frontier positions: (N, 3)
         positions = np.stack([f.position for f in frontiers])
 
@@ -543,11 +544,45 @@ class ExplorationGraph:
             return None
 
         # Distances in the selected plane
-        deltas = positions[:, self.plane_idx] - position[self.plane_idx]
+        deltas = positions[:, self.plane_idx] - position_cam[self.plane_idx]
         distances = np.linalg.norm(deltas, axis=1)
 
-        # Score = gain / (1 + distance)
+        # Prefer frontiers in the direction the camera is facing. Project both
+        # vectors onto the ground plane before taking their normalized dot
+        # product. A position-only pose (or a vertical/degenerate heading)
+        # has no usable direction, so retain distance-only scoring in that case.
+        pose_matrix_value = None
+        if isinstance(pose, PoseNode):
+            pose_matrix_value = pose.camera_pose if pose.camera_pose is not None else pose.pose
+        else:
+            pose_array = np.asarray(pose, dtype=float)
+            if pose_array.shape == (4, 4):
+                pose_matrix_value = pose_array
+
+        if pose_matrix_value is not None:
+            heading = self._camera_forward(pose_matrix_value)[self.plane_idx]
+            heading_norm = np.linalg.norm(heading)
+            if np.isfinite(heading_norm) and heading_norm > 0:
+                delta_norms = distances
+                # A frontier at the robot position has no defined bearing;
+                # leave its directional multiplier neutral.
+                alignment = np.ones_like(distances)
+                np.divide(
+                    deltas @ (heading / heading_norm),
+                    delta_norms,
+                    out=alignment,
+                    where=delta_norms > 0,
+                )
+                # Map cosine similarity from [-1, 1] to a [0, 1] multiplier.
+                directional_reward = (1.0 + np.clip(alignment, -1.0, 1.0)) / 2.0
+            else:
+                directional_reward = 1.0
+        else:
+            directional_reward = 1.0
+
+        # Score = gain / (1 + distance), weighted by facing alignment.
         scores = gains / (1.0 + distances)
+        scores *= (directional_reward * DIRECTIONAL_REWARD) 
         scores[~valid] = -np.inf
 
         # np.argmax gives the first maximum for deterministic tie breaking.
@@ -596,14 +631,14 @@ class ExplorationGraph:
         goal_norm = distance
         if goal_norm == 0:
             self.retire(objective, 'reached')
-            return self.select_frontier(position) if self.auto_select_objective else None
+            return self.select_frontier(pose) if self.auto_select_objective else None
         if direction_norm == 0 or not np.isfinite(direction).all():
             return objective
         cosine = float(np.clip(np.dot(direction, to_goal) / (direction_norm * goal_norm), -1.0, 1.0))
         angle = float(np.degrees(np.arccos(cosine)))
         if distance <= self.visited_distance and angle <= self.fusion_angle_degrees:
             self.retire(objective, 'reached')
-            return self.select_frontier(position) if self.auto_select_objective else None
+            return self.select_frontier(pose) if self.auto_select_objective else None
         return objective
 
     def add_frontiers_graph(
@@ -640,8 +675,34 @@ class ExplorationGraph:
         self.retired_frontiers.append({'reason': reason, 'frontier': asdict(frontier)})
         self.eliminate_frontier(frontier.id)
 
-    def observer(self, frontier, available_frames, current_position=None):
-        """Find the nearest archived valid viewpoint; prefer newer poses on ties."""
+    def calculate_distance(self, node_a_id, node_b_id):
+        """Return route distance in graph steps between two pose nodes.
+
+        Every parent-to-child edge currently costs one step. The graph is a
+        tree, so the distance is the number of edges through the common
+        ancestor.
+        """
+        if node_a_id not in self.poses or node_b_id not in self.poses:
+            raise ValueError("Both distance endpoints must be known pose nodes")
+
+        def ancestors(node_id):
+            result = {}
+            distance = 0
+            while node_id is not None:
+                result[node_id] = distance
+                node_id = self.poses[node_id].parent_id
+                distance += 1
+            return result
+
+        a_ancestors = ancestors(node_a_id)
+        b_ancestors = ancestors(node_b_id)
+        common = a_ancestors.keys() & b_ancestors.keys()
+        if not common:
+            raise ValueError("Pose nodes are not connected")
+        return min(a_ancestors[node_id] + b_ancestors[node_id] for node_id in common)
+
+    def observer(self, frontier: FrontierNode, available_frames, current_position=None):
+        """Find nearest archived viewpoint and its route distance from here."""
         # Retrieval pruning does not destroy the archived route to a viewpoint.
         poses = [self.poses[obs['pose_id']] for obs in frontier.observations
                  if self.poses[obs['pose_id']].frame_index in available_frames
@@ -649,8 +710,15 @@ class ExplorationGraph:
         if not poses:
             raise ValueError(f'No archived route to F{frontier.id}')
         reference = frontier.position if current_position is None else np.asarray(current_position)
-        return min(poses, key=lambda pose: (np.linalg.norm(
+        target = min(poses, key=lambda pose: (np.linalg.norm(
             pose.pose[:3, 3][self.plane_idx] - reference[self.plane_idx]), -pose.id))
+        if current_position is None or not self.poses:
+            distance_node_to_node = 0
+        else:
+            current_node = min(self.poses.values(), key=lambda pose: np.linalg.norm(
+                pose.pose[:3, 3][self.plane_idx] - reference[self.plane_idx]))
+            distance_node_to_node = self.calculate_distance(target.id, current_node.id)
+        return target, distance_node_to_node
 
     def revalidate_objective(self, result, confirmations=3):
         """Reject repeated explicit bad matches, never a missing detection alone."""

@@ -26,7 +26,7 @@ from .explore_navigate import (
     make_parser as base_parser, navigate, yaw,
 )
 from .navigate.depth_navigation import DepthNavigation
-from .navigate.recovery_behaviour import RecoveryBehaviour
+from .navigate.recovery_behaviour import RecoveryBehaviour, should_recover
 from .navigate.lotis_route_policy import LoTISRoutePolicy, compact_route_ids
 from .terminal_keyboard import TerminalKeyboard
 from .visualization.keys import action_for_key, key_name
@@ -54,6 +54,12 @@ def make_parser():
     parser.add_argument('--start-yaw', type=float, help='Initial yaw in degrees; 0 faces -Z, 90 faces -X')
     parser.add_argument('--scan-views', type=int, default=6,
                         help='Directions analyzed at startup and when goals run out (default: 6; 0 disables)')
+    parser.add_argument('--recovery-decision-mode', choices=('confidence', 'graph_distance'),
+                        default='graph_distance', help='Rule used to decide when to recover')
+    parser.add_argument('--confidence-dist-th', type=float, default=0.5,
+                        help='Viewpoint distance threshold in confidence mode (metres)')
+    parser.add_argument('--distance-node-to-node-th', type=float, default=100,
+                        help='Route step threshold in graph-distance mode')
     return parser
 
 
@@ -78,7 +84,7 @@ def save_run(route, graph, run_dir, graph_output):
             Image.fromarray(route.frames[frame_index]).save(path)
 
 
-def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
+def explore(sim, agent, method, worker, graph:ExplorationGraph, graph_output, view, keyboard,
             args, route, step_velocity, turned):
     navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
     recovery_behaviour = RecoveryBehaviour()
@@ -354,17 +360,26 @@ def explore(sim, agent, method, worker, graph, graph_output, view, keyboard,
                 selection_pending = True
         if not paused:
             if objective is None and (not selection_pending or discovery_done):
-                objective = graph.select_saved(route.available_frames, state.position)
+                objective = graph.select_saved(route.available_frames, observation.camera_pose)
                 selection_pending = False
             if objective is not None and objective.id != prepared_goal_id:
                 prepared_goal_id = objective.id
                 recovery_behaviour.reset()
-                target = graph.observer(objective, route.available_frames, current_position=state.position)
-                distance = np.linalg.norm((target.pose[:3, 3] - state.position)[graph.plane_idx])
+                target, distance_node_to_node = graph.observer(
+                    objective, route.available_frames, current_position=state.position)
                 print(f'Selected F{objective.id}, utility score {graph.score(objective, agent.get_state().position):.3f}')
                 if worker.last_result is not None and last_pose_id is not None:
                     view.log_analysis(worker.last_result, last_pose_id, graph)
-                if distance > 0.5 or route.pending_return:
+
+                print(f'Distance to target viewpoint: {distance_node_to_node:.3f}; ')
+                if (should_recover(
+                        objective, target, state.position,
+                        distance_node_to_node=distance_node_to_node,
+                        mode=args.recovery_decision_mode,
+                        confidence_dist_th=args.confidence_dist_th,
+                        distance_node_to_node_th=args.distance_node_to_node_th,
+                        plane_idx=graph.plane_idx)
+                        or route.pending_return):
                     collect(wait=True)
                     recover(target, 'unreachable' if route.pending_return else 'loop_closure')
                     continue
@@ -496,6 +511,7 @@ def main():
         with TerminalKeyboard() as keyboard:
             found = explore(sim, agent, method, worker, graph, graph_output, view,
                             keyboard, args, route, step_velocity, turned)
+
             save_run(route, graph, args.run_dir, graph_output)
             if found and len(route.active) >= 2:
                 navigate(sim, agent, method, [route.frames[i] for i in route.active],
