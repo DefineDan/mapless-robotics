@@ -7,6 +7,8 @@ import numpy as np
 from .frontier_colors import latest_u_gain, u_gain_colors
 from ..terminal_keyboard import TerminalKeyboard
 from .keys import action_for_key, key_name
+from ..exploration.exploration import camera_intrinsics
+from ..exploration.object_search import detection_position
 
 
 OVERLAY_HEIGHT = 0.05
@@ -192,6 +194,49 @@ class RerunView:
                     f"resolution={graph.ena_map.resolution:.3f} m/cell"
                 ),
             )
+
+    def log_object_search(self, result, search):
+        """Draw detections on their exact analyzed capture and in world coordinates."""
+        rr = self.rr
+        rr.log('object_search/image', rr.Image(result.observation.rgb).compress(jpeg_quality=90))
+        rr.log('object_search/image/boxes', rr.Clear(recursive=True))
+        rr.log('world/object_detections', rr.Clear(recursive=True))
+        detections = result.object_detections
+        if detections:
+            boxes = np.asarray([detection.box for detection in detections])
+            labels = [f'{detection.label} {detection.score:.3f}' for detection in detections]
+            rr.log('object_search/image/boxes', rr.Boxes2D(
+                mins=boxes[:, :2], sizes=boxes[:, 2:] - boxes[:, :2],
+                colors=[(255, 210, 40)], labels=labels))
+            height, width = result.observation.rgb.shape[:2]
+            intrinsics = camera_intrinsics(width, height, 90)
+            located = [(detection_position(detection, result.depth,
+                                            result.observation.camera_pose, intrinsics), label)
+                       for detection, label in zip(detections, labels)]
+            located = [(position, label) for position, label in located if position is not None]
+            if located:
+                rr.log('world/object_detections', rr.Points3D(
+                    [position for position, _ in located], colors=[(255, 210, 40)], radii=0.05,
+                    labels=[label for _, label in located]))
+        rr.log('object_search/status', rr.TextDocument(
+            f'Query: {search.query}\nLabels: {", ".join(search.labels)}\n{search.status}\n'
+            f'{len(detections)} boxes; capture time {result.observation.timestamp:.3f}'))
+
+    def log_object_goal(self, search, approach):
+        rr = self.rr
+        rr.log('world/object_goal', rr.Points3D(
+            [search.target.position], colors=[(255, 210, 40)], radii=0.1,
+            labels=[f'OBJECT {search.target.label} {search.target.score:.3f}']))
+        rr.log('world/object_approach', rr.Points3D(
+            [approach], colors=[(40, 230, 70)], radii=0.1, labels=['OBJECT APPROACH']))
+        rr.log('world/object_approach_line', rr.LineStrips3D(
+            [[approach, search.target.position]], colors=[(255, 210, 40)]))
+        rr.log('object_search/status', rr.TextDocument(
+            f'Query: {search.query}\nLabels: {", ".join(search.labels)}\n{search.status}'))
+
+    def clear_object_goal(self):
+        for entity in ('world/object_goal', 'world/object_approach', 'world/object_approach_line'):
+            self.rr.log(entity, self.rr.Clear(recursive=True))
 
     def log_navigation_map(self, navigator):
         if self.paused:

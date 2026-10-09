@@ -70,7 +70,7 @@ def make_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def configure_view(view: RerunView) -> None:
+def configure_view(view: RerunView, *, object_search=False) -> None:
     import rerun.blueprint as rrb
 
     view.rr.send_blueprint(
@@ -84,6 +84,9 @@ def configure_view(view: RerunView) -> None:
                     rrb.Spatial2DView(name="LoTIS goal", origin="goal"),
                     rrb.Spatial2DView(name="Return viewpoint", origin="return_target/image"),
                     rrb.TextDocumentView(name="Return target", origin="return_target/status"),
+                    *([rrb.Spatial2DView(name="Object detections", origin="object_search/image"),
+                       rrb.TextDocumentView(name="Object search", origin="object_search/status")]
+                      if object_search else []),
                     rrb.Spatial2DView(
                         name="Closest trajectory frame", origin="closest_trajectory_frame"
                     ),
@@ -514,14 +517,23 @@ def navigate(
     turned: Turned,
 ) -> None:
     """Reset to the start of the explored route and let LoTIS drive to its end."""
+    view.set_paused(False)
     agent.set_state(states[0])
     view.rr.log("goal", view.rr.Image(frames[-1]).compress(jpeg_quality=90))
     print("Encoding explored route...")
     encode_route(method, frames, "forward", positions=[state.position for state in states])
+    # Startup scans can leave the first traveled segment outside the original
+    # view. Face that segment before asking LoTIS to find its visual reference.
+    initial_yaw = None
+    for state in states[1:]:
+        delta = state.position - states[0].position
+        if np.linalg.norm(delta[[0, 2]]) >= 0.15:
+            initial_yaw = float(np.arctan2(-delta[0], -delta[2]))
+            break
     print("Navigating with LoTIS; press q to stop")
     drive(
         sim, agent, method, states[-1].position, worker, graph, graph_output,
-        view, keyboard, max_steps, step_velocity, turned,
+        view, keyboard, max_steps, step_velocity, turned, initial_yaw=initial_yaw,
     )
 
 
