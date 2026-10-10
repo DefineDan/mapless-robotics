@@ -3,6 +3,7 @@
 Controls: u rejects a frontier, o dismisses an object, Space pauses/resumes, f forces analysis, g saves,
 r retries a stopped recovery, Enter marks the object found and starts retrieval,
 q/Escape quits (during recovery it stops the return and pauses exploration).
+While a recovery is stopped, arrows move, a/d turn and b turns around before r retries.
 """
 
 from __future__ import annotations
@@ -51,6 +52,8 @@ logger = logging.getLogger(__name__)
 ARRIVAL_BACKSTOP = 1.0  # metres
 # A forced return closer than this to its target viewpoint only closes the loop, without driving.
 SKIP_RETURN_RADIUS = 0.2  # metres
+# turn_left steps (10 degrees each, see make_sim) for b to turn a stopped return around.
+TURN_AROUND_STEPS = 18
 
 
 def make_parser():
@@ -379,7 +382,8 @@ def explore(
                     objective, target_pose, route.frames[target_pose.frame_index],
                     score=graph.score(objective, agent.get_state().position), status='Return paused',
                 )
-            print('Return incomplete. Press r to retry; archived routes have been retained')
+            print('Return incomplete; archived routes have been retained. Arrows move, a/d turn, '
+                  'b turns around, r retries LoTIS from here, q quits')
             return
         print(f'Closed loop at frame {reached} (target {target_pose.frame_index})')
         route.close_loop(reached, reason)
@@ -452,6 +456,14 @@ def explore(
                 force_analysis = True
                 discovery_done = False
         if recovery is not None:
+            # A stopped return waits for the operator: nudge the robot, then r retries from here.
+            # Moves are not recorded, and the camera pitch stays fixed so LoTIS can still match.
+            action = action_for_key(key_name(key))
+            if key == ord('b'):
+                for _ in range(TURN_AROUND_STEPS):
+                    sim.step('turn_left')
+            elif action is not None and action not in ('look_up', 'look_down'):
+                sim.step(action)
             continue
         if key == ord('o') and object_goal is not None:
             collect(wait=True)
