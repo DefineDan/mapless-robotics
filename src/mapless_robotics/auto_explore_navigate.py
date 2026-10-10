@@ -3,6 +3,7 @@
 Controls: u rejects a frontier, o dismisses an object, Space pauses/resumes, f forces analysis, g saves,
 r retries a stopped recovery, Enter marks the object found and starts retrieval,
 q/Escape quits (during recovery it stops the return and pauses exploration).
+While a recovery is stopped, arrows move, a/d turn and b turns around before r retries.
 """
 
 from __future__ import annotations
@@ -51,6 +52,8 @@ logger = logging.getLogger(__name__)
 ARRIVAL_BACKSTOP = 1.0  # metres
 # A forced return closer than this to its target viewpoint only closes the loop, without driving.
 SKIP_RETURN_RADIUS = 0.2  # metres
+# turn_left steps (10 degrees each, see make_sim) for b to turn a stopped return around.
+TURN_AROUND_STEPS = 18
 
 
 def make_parser():
@@ -148,7 +151,9 @@ def explore(
     prepared_goal_id = None
     scan = None
     scan_views = args.scan_views
-    scan_requested = False
+    # Look all the way around once before choosing the first frontier.
+    initial_scan = scan_views > 0 and graph.objective_frontier is None
+    scan_requested = initial_scan
     discovery_frame = None
     discovery_done = False
     selection_pending = graph.objective_frontier is None
@@ -193,7 +198,8 @@ def explore(
                     discovery_done = True
                 if scan is not None:
                     scan.analyzed(graph.poses[pose_id].frame_index)
-                    if graph.best_saved(route.available_frames, agent.get_state().position) is not None:
+                    if (not scan.full and graph.best_saved(
+                            route.available_frames, agent.get_state().position) is not None):
                         scan = None
                 if previous_objective is not None and graph.objective_frontier is None:
                     selection_pending = True
@@ -376,7 +382,8 @@ def explore(
                     objective, target_pose, route.frames[target_pose.frame_index],
                     score=graph.score(objective, agent.get_state().position), status='Return paused',
                 )
-            print('Return incomplete. Press r to retry; archived routes have been retained')
+            print('Return incomplete; archived routes have been retained. Arrows move, a/d turn, '
+                  'b turns around, r retries LoTIS from here, q quits')
             return
         print(f'Closed loop at frame {reached} (target {target_pose.frame_index})')
         route.close_loop(reached, reason)
@@ -449,6 +456,14 @@ def explore(
                 force_analysis = True
                 discovery_done = False
         if recovery is not None:
+            # A stopped return waits for the operator: nudge the robot, then r retries from here.
+            # Moves are not recorded, and the camera pitch stays fixed so LoTIS can still match.
+            action = action_for_key(key_name(key))
+            if key == ord('b'):
+                for _ in range(TURN_AROUND_STEPS):
+                    sim.step('turn_left')
+            elif action is not None and action not in ('look_up', 'look_down'):
+                sim.step(action)
             continue
         if key == ord('o') and object_goal is not None:
             collect(wait=True)
@@ -489,6 +504,7 @@ def explore(
             view.set_paused(paused)
             scan = None
             scan_requested = False
+            initial_scan = False
             discovery_done = False
             force_analysis = True
             object_arrival_time = None
@@ -551,13 +567,17 @@ def explore(
         if not paused and (scan_requested or scan is not None):
             if scan is None:
                 collect(wait=True)
-                scan = ViewScan(yaw(observation.robot_pose), scan_views)
-                # The current heading was just analyzed without candidates.
-                scan.completed_views = 1
+                scan = ViewScan(yaw(observation.robot_pose), scan_views, full=initial_scan)
+                if not initial_scan:
+                    # The current heading was just analyzed without candidates.
+                    scan.completed_views = 1
+                initial_scan = False
                 scan_requested = False
                 print(f'Scanning {scan_views} directions before selecting a frontier')
             if scan.complete:
                 scan = None
+                # Every direction is analyzed; select without another discovery frame.
+                discovery_done = True
                 if graph.best_saved(route.available_frames, agent.get_state().position) is None:
                     paused = True
                     view.set_paused(paused)
