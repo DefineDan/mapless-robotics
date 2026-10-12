@@ -61,6 +61,8 @@ class RerunView:
         self.vertical_index = 1
         self.enable_depth_vis = enable_depth_vis
         self.enable_navigation_points_vis = enable_navigation_points_vis
+        # Simulator robot trail, drawn once it diverges from odometry (the graph shows odometry).
+        self.ground_truth_trail = []
         rr.init("frontier_exploration", spawn=spawn)
         rr.send_blueprint(
             rrb.Blueprint(
@@ -131,6 +133,7 @@ class RerunView:
                 radii=0.04,
             ),
         )
+        self.log_ground_truth(observation)
         if graph is not None and graph.ena_map is not None:
             grid, (map_x, map_z, map_theta) = graph.ena_map.get_map()
             # ExplorationMap already stores rows along world Z and columns
@@ -194,6 +197,29 @@ class RerunView:
                     f"resolution={graph.ena_map.resolution:.3f} m/cell"
                 ),
             )
+
+    def log_ground_truth(self, observation):
+        """Draw the simulator pose next to the odometry pose the robot believes."""
+        truth = getattr(observation, "gt_robot_pose", None)
+        if truth is None:
+            return
+        rr = self.rr
+        believed = observation.robot_pose[:3, 3]
+        if (not self.ground_truth_trail
+                or np.linalg.norm(truth[:3, 3] - self.ground_truth_trail[-1]) >= 0.05):
+            self.ground_truth_trail.append(truth[:3, 3].copy())
+        if np.allclose(truth, observation.robot_pose):
+            return  # Ground-truth pose (or no drift yet): nothing extra to show.
+        lift = np.array([0.0, 0.4, 0.0])
+        rr.log(
+            "world/robot_ground_truth",
+            rr.Arrows3D(origins=[truth[:3, 3] + lift], vectors=[-truth[:3, 2] * 0.4],
+                        colors=[(150, 150, 150)], radii=0.025),
+        )
+        rr.log("world/trajectory/ground_truth",
+               rr.LineStrips3D([self.ground_truth_trail], colors=[(150, 150, 150)], radii=0.01))
+        rr.log("odometry/position_error_m",
+               rr.Scalars(float(np.linalg.norm((believed - truth[:3, 3])[[0, 2]]))))
 
     def log_object_search(self, result, search):
         """Draw detections on their exact analyzed capture and in world coordinates."""

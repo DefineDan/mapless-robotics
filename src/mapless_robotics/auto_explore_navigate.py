@@ -34,6 +34,7 @@ from .explore_navigate import (
     make_parser as base_parser, navigate, yaw,
 )
 from .navigate.depth_navigation import DepthNavigation
+from .navigate.odometry import OdometryAgent
 from .navigate.recovery_behaviour import RecoveryBehaviour, should_recover
 from .navigate.lotis_route_policy import LoTISRoutePolicy, compact_route_ids
 from .terminal_keyboard import TerminalKeyboard
@@ -47,7 +48,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Ground-truth radius in metres, consulted only after LoTIS stops a return leg without
+# Odometry radius in metres, consulted only after LoTIS stops a return leg without
 # signalling arrival (endpoint is the nearest visible frame, see LoTISRoutePolicy).
 ARRIVAL_BACKSTOP = 1.0  # metres
 # A forced return closer than this to its target viewpoint only closes the loop, without driving.
@@ -98,6 +99,11 @@ def make_parser():
                         help='Detection consistency radius in metres (default: 0.75)')
     parser.add_argument('--object-stand-off', type=float, default=1.0,
                         help='Approach distance from the object surface in metres (default: 1)')
+    parser.add_argument('--odometry-noise', type=float, default=0.0,
+                        help='Odometry noise scale; std is noise*sqrt(metres) in translation and '
+                             'noise*sqrt(radians + metres) in yaw (default: 0, ground-truth pose)')
+    parser.add_argument('--odometry-seed', type=int,
+                        help='Seed for the odometry noise (default: the start seed)')
     return parser
 
 
@@ -106,6 +112,10 @@ def save_run(route, graph, run_dir, graph_output):
     run_dir.mkdir(parents=True, exist_ok=True)
     metadata = route.to_dict()
     metadata['initialization'] = getattr(route, 'initialization', None)
+    # Believed (odometry) and simulator positions of every archived frame, for drift plots.
+    metadata['odometry_positions'] = [np.asarray(state.position).tolist() for state in route.states]
+    metadata['ground_truth_positions'] = [None if pose is None else pose[:3, 3].tolist()
+                                          for pose in route.gt_poses]
     if hasattr(route, 'object_search'):
         metadata['object_search'] = route.object_search
     metadata['archive_directory'] = 'archive'
@@ -174,7 +184,7 @@ def explore(
         now = time.monotonic()
         if force_analysis or key == ord('f') or worker.trigger.due(observation, now):
             if not worker.busy:
-                index = route.append(observation.rgb, state)
+                index = route.append(observation.rgb, state, observation.gt_robot_pose)
                 if worker.submit(observation, now, manual=force_analysis or key == ord('f'),
                                  frame_index=index, depth_only=False):
                     discovery_frame = index
@@ -423,7 +433,7 @@ def explore(
         view.log_camera(observation, time.monotonic(), graph=graph)
         if recovery is None and changed_enough(
                 state, route.states[route.active[-1]] if route.active else None, turned):
-            index = route.append(observation.rgb, state)
+            index = route.append(observation.rgb, state, observation.gt_robot_pose)
             view.log('last_recorded_frame', view.rr.Image(route.frames[index]))
         collect()
         collect_objects()
@@ -436,7 +446,7 @@ def explore(
                       'or find an alternative with f and resume with Space')
                 continue
             collect(wait=True)
-            route.append(observation.rgb, state)
+            route.append(observation.rgb, state, observation.gt_robot_pose)
             if object_search is not None and not object_reached:
                 object_search.status = 'Found (operator confirmed)'
                 object_metadata()
@@ -540,7 +550,7 @@ def explore(
                             paused = True
                             view.set_paused(paused)
                             object_search.status = 'Found; press Enter to retrieve or o to dismiss'
-                            route.append(observation.rgb, state)
+                            route.append(observation.rgb, state, observation.gt_robot_pose)
                             print(f'Found {object_search.target.label}; paused. '
                                   'Enter starts LoTIS retrieval, o dismisses the object')
                     else:
@@ -587,7 +597,7 @@ def explore(
                 now = time.monotonic()
                 angular, ready = scan.command(yaw(observation.robot_pose))
                 if ready and not worker.busy:
-                    index = route.append(observation.rgb, state)
+                    index = route.append(observation.rgb, state, observation.gt_robot_pose)
                     if worker.submit(observation, now, manual=True, frame_index=index):
                         scan.waiting_frame = index
                 elif angular and now >= next_control:
@@ -648,7 +658,7 @@ def explore(
         # analysis while stationary. The worker keeps just one capture in flight.
         if force_analysis or key == ord('f') or worker.trigger.due(observation, now):
             if not worker.busy:
-                index = route.append(observation.rgb, state)
+                index = route.append(observation.rgb, state, observation.gt_robot_pose)
                 if worker.submit(observation, now, manual=force_analysis or key == ord('f'),
                                  frame_index=index, depth_only=False):
                     discovery_frame = index
@@ -693,6 +703,8 @@ def main():
         parser.error('--lotis-speed must be finite and positive')
     if args.max_steps <= 0 or not np.isfinite(args.integration_time) or args.integration_time <= 0:
         parser.error('--max-steps and --integration-time must be positive')
+    if not np.isfinite(args.odometry_noise) or args.odometry_noise < 0:
+        parser.error('--odometry-noise must be finite and non-negative')
     try:
         scene = resolve_scene(args.scene, args.index, args.scenes_dir)
         graph = ExplorationGraph(args.merge_distance, auto_select_objective=False)
@@ -746,10 +758,17 @@ def main():
         state.rotation = quat_from_magnum(mn.Quaternion.rotation(
             mn.Rad(np.deg2rad(heading)), mn.Vector3(0.0, 1.0, 0.0)))
         agent.set_state(state)
+        start_state = agent.get_state()
+        # From here on the system only sees odometry; noise 0 passes ground truth through.
+        odometry_seed = start_seed if args.odometry_seed is None else args.odometry_seed
+        agent = OdometryAgent(agent, args.odometry_noise, odometry_seed)
         route.initialization = dict(position=position.tolist(), yaw_degrees=heading,
-                                    camera_pitch_degrees=args.camera_pitch, seed=start_seed)
+                                    camera_pitch_degrees=args.camera_pitch, seed=start_seed,
+                                    odometry_noise=args.odometry_noise, odometry_seed=odometry_seed)
         print(f'Start XYZ={position.tolist()}, yaw={heading:.1f} degrees, '
               f'camera pitch={args.camera_pitch:.1f} degrees (positive down), seed={start_seed}')
+        print(f'Odometry noise {args.odometry_noise}' if agent.enabled
+              else 'Odometry noise 0: using ground-truth pose')
         if object_search is not None:
             if args.no_qwen:
                 object_search.labels = (object_search.query,)
@@ -801,6 +820,9 @@ def main():
                 object_worker = None
             save_run(route, graph, args.run_dir, graph_output)
             if found and len(route.active) >= 2:
+                # The follower starts at the true start with fresh odometry, which is
+                # where the explorer's odometry frame began (route frame 0).
+                agent.teleport(start_state)
                 navigate(sim, agent, method, [route.frames[i] for i in route.active],
                          [route.states[i] for i in route.active], None, graph,
                          graph_output, view, keyboard, args.max_steps, step_velocity, turned)

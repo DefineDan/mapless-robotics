@@ -32,11 +32,15 @@ class Observation:
     camera_pose: np.ndarray
     timestamp: float
     depth: np.ndarray | None = None
+    # Simulator poses, for plotting and evaluation only. robot_pose and
+    # camera_pose are what the robot believes (odometry, see OdometryAgent).
+    gt_robot_pose: np.ndarray | None = None
+    gt_camera_pose: np.ndarray | None = None
 
     def __post_init__(self):
         # Copy before processing: movement and reused camera buffers cannot
         # change data while the worker is processing it.
-        for name in ("rgb", "robot_pose", "camera_pose", "depth"):
+        for name in ("rgb", "robot_pose", "camera_pose", "depth", "gt_robot_pose", "gt_camera_pose"):
             value = getattr(self, name)
             if value is not None:
                 value = (

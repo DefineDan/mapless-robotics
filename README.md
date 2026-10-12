@@ -564,3 +564,80 @@ without loading models or starting Habitat:
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 ```
+
+### Noisy odometry instead of ground-truth pose
+
+By default the launcher reads the robot pose from the simulator. To make it run
+on drifting odometry instead, pass `--odometry-noise`:
+
+```bash
+python -m mapless_robotics.auto_explore_navigate --index 10 --seed 1 \
+  --odometry-noise 0.01
+```
+
+`navigate/odometry.py` wraps the Habitat agent in an `OdometryAgent`. Motion
+still goes to the real agent (`sim.step`, `step_velocity`, `get_sim_action`).
+Every pose *read* (`agent.get_state()`, and therefore `capture()`) adds up the
+true motion since the last read, adds Gaussian noise, and returns the body and
+sensor poses in the odometry frame.
+
+The noise for each motion of planar distance `d` (m) and turn `dθ` (rad) is:
+
+- translation std `noise·sqrt(d)`, applied to both ground-plane axes;
+- yaw std `noise·sqrt(|dθ| + d)`.
+
+The variance grows linearly with motion, so drift does not depend on step size
+or on how often the pose is read. As a guide, `0.01` gives about 0.4 m of error
+after 20 m of straight driving (about 2%), and `0.05` gives about 2 m.
+
+`--odometry-noise 0` (the default) is an exact passthrough to ground truth.
+`--odometry-seed` fixes the noise; it defaults to the start `--seed`.
+
+Odometry starts equal to the ground-truth start pose. Every downstream component
+only ever sees odometry. Ground truth is kept for evaluation only:
+
+- In Rerun, once the two poses diverge, a grey `world/robot_ground_truth` arrow
+  appears next to the green odometry arrow.
+- Rerun also draws a thin grey `world/trajectory/ground_truth` trail (the graph
+  already shows the odometry poses) and plots the planar error as
+  `odometry/position_error_m`.
+- `route.json` stores `odometry_positions` and `ground_truth_positions` for every
+  archived frame, and records the noise settings under `initialization`.
+- `Observation` has `gt_robot_pose` and `gt_camera_pose` next to the odometry
+  `robot_pose` and `camera_pose`.
+
+The robot sometimes has to be "put" at a pose, for example when `restore_view`
+turns back to a recorded heading. `OdometryAgent.set_state` treats this as the
+relative motion the robot would execute from its *believed* pose, and that
+motion is itself integrated with noise. Before retrieval, `teleport` places the
+follower at the true start and resets its odometry, which is where the
+explorer's odometry frame began.
+
+Limitation: the model measures the motion the robot actually made, after
+Habitat's `step_filter` slides it along walls. It does not model wheel slip,
+where wheels turn without the robot moving.
+
+#### Where the pipeline depends on pose, and how drift should break it
+
+| Where | Pose used | Expected failure under drift |
+|---|---|---|
+| Frontier back-projection (`ExplorationPipeline.process`, `opencv_extrinsic(camera_pose)`) | camera pose | The same physical frontier seen at different times lands at different world points. |
+| Frontier fusion (`ExplorationGraph.add_frontier`, `merge_distance` 0.5 m, `fusion_angle_degrees` 30°) | frontier positions | Once drift exceeds about 0.5 m or 30°, re-observations stop fusing (duplicate frontiers), or unrelated ones merge. |
+| Visited marking / `ExplorationMap` (`add_pose`, `test_visit`) | pose nodes | Explored areas are not marked visited, so the robot re-explores them; unexplored areas can be wrongly invalidated. |
+| Objective arrival (`eval_objective`, `revalidate_objective`, `visited_distance` 0.5 m) | robot and camera pose | A frontier is never "reached", or is retired before the robot gets there. |
+| Frontier selection (`select_saved`, `best_saved`, `score`) | camera pose | Distance and heading terms are biased. This is a soft degradation. |
+| Recovery decision (`graph.observer`, `should_recover`) | current position vs pose nodes | The nearest observing viewpoint is wrong, causing unnecessary or missed LoTIS returns. |
+| Local depth planner (`DepthNavigation.set_data` / `get_command`) | camera pose | Consistent over short horizons, but accumulated depth frames smear, which can create phantom obstacles and stuck goals. |
+| Stuck detection (`RecoveryBehaviour.is_stuck`) | robot pose history | Still works here because the model measures real motion. With real wheel slip, a stuck robot would look like it was moving. |
+| Route recording spacing (`changed_enough`, 0.2 m / 15°) | recorded states | Frame spacing becomes slightly irregular. Harmless. |
+| LoTIS route geometry (`compact_route_ids`, `route_positions`, initial yaw) | recorded odometry states | Drift is locally consistent, so this is mostly robust. Long legs get distorted lookahead lengths. |
+| LoTIS `goal_distance_m` and the `drive` stall / endpoint logic | live position vs goal position | Endpoint slowdown triggers in the wrong place, and the "accepting" fallbacks fire early or late. This is the biggest risk on return legs. |
+| `ARRIVAL_BACKSTOP` (1 m), loop-closure gap check (1 m), `SKIP_RETURN_RADIUS` (0.2 m) | positions | Incomplete returns are accepted or complete ones rejected, and the loop is closed at the wrong archive frame. |
+| `restore_view` | recorded heading | The robot turns to the *believed* heading, so the true view is off by the yaw drift. LoTIS and the fresh depth start misaligned. |
+| `ViewScan` headings | yaw | Scan directions are unevenly spaced. Minor. |
+| Object search (`detection_position`, 0.75 m consistency radius, `approach_position`, approach controller) | camera and robot pose | Confirmations taken far apart in time stop agreeing, and the approach point is offset by the drift. |
+| Retrieval (`navigate`, `drive` goal = last recorded odometry position) | explorer odometry vs follower odometry | Goal radius and goal distance compare two independently drifting frames. |
+| Start pose (`choose_start`, navmesh) | ground truth by design | Not affected; this is simulator setup. |
+
+Simulator stepping (`sim.step`, `step_filter` collisions) and plotting
+intentionally stay on ground truth.

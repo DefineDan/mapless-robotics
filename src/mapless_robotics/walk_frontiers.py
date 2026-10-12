@@ -146,12 +146,17 @@ def make_sim(scene_path: str, with_depth=False, camera_pitch=0.0):
 
 
 def capture(sim, agent):
-    """Read pixels and ground-truth body/sensor poses before the next action."""
+    """Read pixels and body/sensor poses before the next action.
+
+    Poses come from ``agent.get_state()``: odometry for an OdometryAgent, else
+    ground truth. The ground-truth poses are always kept in the gt_* fields.
+    """
     from habitat_sim.utils.common import quat_to_magnum
 
     pixels = sim.get_sensor_observations()
     timestamp = time.time()
     state = agent.get_state()
+    truth = agent.ground_truth_state() if hasattr(agent, "ground_truth_state") else state
 
     def matrix(sensor_state):
         result = np.eye(4)
@@ -165,6 +170,8 @@ def capture(sim, agent):
         matrix(state.sensor_states["rgb"]),
         timestamp,
         pixels.get("depth"),
+        matrix(truth),
+        matrix(truth.sensor_states["rgb"]),
     )
 
 
