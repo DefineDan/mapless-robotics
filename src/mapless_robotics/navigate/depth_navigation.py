@@ -16,7 +16,9 @@ class DepthNavigation:
 
     Poses are Habitat local-to-world transforms (X right, Y up, camera forward
     along local -Z). Occupancy is rebuilt from only the last ``history_size``
-    frames, limiting the effect of noisy pose estimates.
+    frames, limiting the effect of noisy pose estimates. Depth returns are
+    grouped into 3D voxels; voxels with fewer than ``min_voxel_points`` returns
+    are discarded before obstacle and free-space evidence is added.
     """
 
     def __init__(
@@ -28,12 +30,14 @@ class DepthNavigation:
         map_padding=0.4,
         unknown_cost=3.0,
         max_depth=2.0,
+        voxel_size=0.15,
+        min_voxel_points=10,
         linear_speed=0.25,
         angular_gain=1.5,
         max_angular_speed=1.0,
         goal_tolerance=0.1,
         heading_tolerance=0.1,
-        angular_smoothing=0.35,
+        angular_smoothing=1.0,
         vertical_axis="y",
         camera_intrinsics=None,
         planner=None,
@@ -47,12 +51,16 @@ class DepthNavigation:
         if not np.isfinite(unknown_cost) or unknown_cost < 1:
             raise ValueError("unknown_cost must be finite and at least 1")
         values = (positive_delta, negative_delta, occupancy_resolution, max_depth,
+                  voxel_size,
                   linear_speed, angular_gain, max_angular_speed, goal_tolerance,
                   heading_tolerance, angular_smoothing)
         if not np.isfinite(values).all() or min(values) <= 0:
             raise ValueError("navigation distances and speeds must be finite and positive")
         if angular_smoothing > 1:
             raise ValueError("angular_smoothing must be in the interval (0, 1]")
+        if (not np.isfinite(min_voxel_points) or min_voxel_points < 1
+                or int(min_voxel_points) != min_voxel_points):
+            raise ValueError("min_voxel_points must be a positive integer")
         self.history_size = int(history_size)
         self.positive_delta = float(positive_delta)
         self.negative_delta = float(negative_delta)
@@ -60,6 +68,8 @@ class DepthNavigation:
         self.map_padding = float(map_padding)
         self.unknown_cost = float(unknown_cost)
         self.max_depth = float(max_depth)
+        self.voxel_size = float(voxel_size)
+        self.min_voxel_points = int(min_voxel_points)
         self.linear_speed = float(linear_speed)
         self.angular_gain = float(angular_gain)
         self.max_angular_speed = float(max_angular_speed)
@@ -157,7 +167,14 @@ class DepthNavigation:
         height_delta = world[:, self.vertical_index] - pose[self.vertical_index, 3]
         within_height = ((height_delta <= self.positive_delta)
                          & (height_delta >= -self.negative_delta))
-        points = world[within_height][:, self.plane_indices]
+        world = world[within_height]
+        if len(world) and self.min_voxel_points > 1:
+            voxel_indices = np.floor(world / self.voxel_size).astype(np.int64)
+            _, inverse, counts = np.unique(
+                voxel_indices, axis=0, return_inverse=True, return_counts=True
+            )
+            world = world[counts[inverse] >= self.min_voxel_points]
+        points = world[:, self.plane_indices]
 
         # A depth ray confirms free space up to (but not including) its surface
         # endpoint. Many pixels project into the same cell, so deduplicate the
