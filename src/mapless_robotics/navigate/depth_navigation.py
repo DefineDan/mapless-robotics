@@ -31,8 +31,9 @@ class DepthNavigation:
         linear_speed=0.25,
         angular_gain=1.5,
         max_angular_speed=1.0,
-        goal_tolerance=0.25,
+        goal_tolerance=0.1,
         heading_tolerance=0.1,
+        angular_smoothing=0.35,
         vertical_axis="y",
         camera_intrinsics=None,
         planner=None,
@@ -47,9 +48,11 @@ class DepthNavigation:
             raise ValueError("unknown_cost must be finite and at least 1")
         values = (positive_delta, negative_delta, occupancy_resolution, max_depth,
                   linear_speed, angular_gain, max_angular_speed, goal_tolerance,
-                  heading_tolerance)
+                  heading_tolerance, angular_smoothing)
         if not np.isfinite(values).all() or min(values) <= 0:
             raise ValueError("navigation distances and speeds must be finite and positive")
+        if angular_smoothing > 1:
+            raise ValueError("angular_smoothing must be in the interval (0, 1]")
         self.history_size = int(history_size)
         self.positive_delta = float(positive_delta)
         self.negative_delta = float(negative_delta)
@@ -62,6 +65,8 @@ class DepthNavigation:
         self.max_angular_speed = float(max_angular_speed)
         self.goal_tolerance = float(goal_tolerance)
         self.heading_tolerance = float(heading_tolerance)
+        self.angular_smoothing = float(angular_smoothing)
+        self._last_angular_velocity = 0.0
         self.vertical_index = {"x": 0, "y": 1, "z": 2}[vertical_axis]
         self.plane_indices = [i for i in range(3) if i != self.vertical_index]
         self.camera_intrinsics = camera_intrinsics
@@ -76,6 +81,7 @@ class DepthNavigation:
         self._frames = deque(maxlen=self.history_size)
         self._free_frames = deque(maxlen=self.history_size)
         self.goal = None
+        self.angle_objective = None
         self.camera_pose = None
         self.occupancy = {}
         self.free_space = set()
@@ -101,7 +107,10 @@ class DepthNavigation:
                 y0 += sy
         return cells
 
-    def set_data(self, goal, depth_image, camera_pose, camera_intrinsics=None):
+    def set_data(
+        self, goal, depth_image, camera_pose, camera_intrinsics=None,
+        angle_objective=None,
+    ):
         """Add a depth observation and update the current goal and occupancy.
 
         ``goal`` is a world-frame XYZ point, ``depth_image`` is metric depth,
@@ -165,6 +174,11 @@ class DepthNavigation:
             free_cells.update(self._ray_cells(camera_cell, endpoint))
 
         self.goal = goal
+        if angle_objective is not None:
+            angle_objective = float(angle_objective)
+            if not np.isfinite(angle_objective):
+                raise ValueError("angle_objective must be finite when provided")
+        self.angle_objective = angle_objective
         self.camera_pose = pose.copy()
         self._frames.append(points)
         self._free_frames.append(free_cells)
@@ -192,6 +206,13 @@ class DepthNavigation:
         """Return the number of waypoints in the current trajectory."""
         return len(self.trajectory)
 
+    def _smooth_angular_velocity(self, angular):
+        """Low-pass filter angular commands across control updates."""
+        self._last_angular_velocity += self.angular_smoothing * (
+            float(angular) - self._last_angular_velocity
+        )
+        return self._last_angular_velocity
+
     def get_command(self, camera_pose=None):
         """Return ``(linear_velocity, angular_velocity)`` in m/s and rad/s.
 
@@ -211,8 +232,9 @@ class DepthNavigation:
         position = self.camera_pose[:3, 3][self.plane_indices]
         target = self.goal[self.plane_indices]
         goal_distance = float(np.linalg.norm(target - position))
-        if not len(self.trajectory):
-            return 0.0, 0.0
+        within_goal_tolerance = goal_distance <= self.goal_tolerance
+        if not len(self.trajectory) and not within_goal_tolerance:
+            return 0.0, self._smooth_angular_velocity(0.0)
 
         # Advance past route cells already reached; the planner's waypoints
         # represent cell centers, so use the goal tolerance as the threshold.
@@ -221,43 +243,52 @@ class DepthNavigation:
             if np.linalg.norm(delta) > self.goal_tolerance:
                 break
             self._trajectory_index += 1
-        if goal_distance <= self.goal_tolerance:
-            # Face the goal while approaching it. At the goal itself, use the
-            # last path segment as the desired final heading.
-            desired = target - position
-            if np.linalg.norm(desired) < 1e-9 and len(self.trajectory) > 1:
-                desired = self.trajectory[-1] - self.trajectory[-2]
-            if np.linalg.norm(desired) < 1e-9:
-                return 0.0, 0.0
-            desired /= np.linalg.norm(desired)
+        if within_goal_tolerance:
+            if self.angle_objective is not None:
+                # Yaw uses Habitat's convention: zero faces world -Z and
+                # positive yaw turns toward world -X.
+                desired = np.array([
+                    -np.sin(self.angle_objective),
+                    -np.cos(self.angle_objective),
+                ])
+            else:
+                # Preserve the previous goal-facing behavior for callers that
+                # do not provide a final objective angle.
+                desired = target - position
+                if np.linalg.norm(desired) < 1e-9 and len(self.trajectory) > 1:
+                    desired = self.trajectory[-1] - self.trajectory[-2]
+                if np.linalg.norm(desired) < 1e-9:
+                    return 0.0, self._smooth_angular_velocity(0.0)
+                desired /= np.linalg.norm(desired)
         else:
             desired = self.trajectory[self._trajectory_index] - position
             distance = float(np.linalg.norm(desired))
             if distance < 1e-9:
-                return 0.0, 0.0
+                return 0.0, self._smooth_angular_velocity(0.0)
             desired /= distance
 
         # Camera forward is local -Z, projected into the selected ground plane.
         forward = (self.camera_pose[:3, :3] @ np.array([0.0, 0.0, -1.0]))[self.plane_indices]
         forward_norm = float(np.linalg.norm(forward))
         if forward_norm < 1e-9:
-            return 0.0, 0.0
+            return 0.0, self._smooth_angular_velocity(0.0)
         forward /= forward_norm
         cross = forward[0] * desired[1] - forward[1] * desired[0]
         dot = float(np.clip(np.dot(forward, desired), -1.0, 1.0))
         # In Habitat's X-right/Z-forward ground plane, positive yaw about +Y
         # turns left, so negate the 2D cross product's sign convention.
         angle = float(np.arctan2(-cross, dot))
-        if goal_distance <= self.goal_tolerance:
+        if within_goal_tolerance:
             if abs(angle) <= self.heading_tolerance:
+                self._last_angular_velocity = 0.0
                 return 0.0, 0.0
             angular = float(np.clip(self.angular_gain * angle,
                                     -self.max_angular_speed, self.max_angular_speed))
-            return 0.0, angular
+            return 0.0, self._smooth_angular_velocity(angular)
         angular = float(np.clip(self.angular_gain * angle,
                                 -self.max_angular_speed, self.max_angular_speed))
         linear = self.linear_speed * max(0.0, dot)
-        return float(linear), angular
+        return float(linear), self._smooth_angular_velocity(angular)
 
     def get_sim_action(self, linear, angular, integration_time=0.1):
         """Return a callable that applies velocities to a Habitat simulator."""

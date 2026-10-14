@@ -60,7 +60,7 @@ TURN_AROUND_STEPS = 18
 def make_parser():
     parser = base_parser()
     parser.description = __doc__
-    parser.set_defaults(exploration='periodic', enable_auto=True, interval=0.5, camera_pitch=10.0)
+    parser.set_defaults(exploration='periodic', enable_auto=True, interval=0.5)
     for action in parser._actions:
         if action.dest == 'exploration':
             action.help = 'Analysis trigger (default: periodic)'
@@ -231,8 +231,18 @@ def explore(
                 if object_goal is not None:
                     navigator.set_data(object_goal, result.depth, result.observation.camera_pose)
                 elif objective is not None:
-                    navigator.set_data(objective.position, result.depth,
-                                       result.observation.camera_pose)
+                    frontier_angle = None
+                    if objective.vd is not None:
+                        view_direction = np.asarray(objective.vd, dtype=float)
+                        if (view_direction.shape == (3,)
+                                and np.isfinite(view_direction).all()
+                                and np.linalg.norm(view_direction[[0, 2]]) > 0):
+                            frontier_angle = float(np.arctan2(
+                                -view_direction[0], -view_direction[2]))
+                    navigator.set_data(
+                        objective.position, result.depth, result.observation.camera_pose,
+                        angle_objective=frontier_angle,
+                    )
         except Exception:
             paused = True
             view.set_paused(paused)
@@ -258,7 +268,7 @@ def explore(
                     object_goal = approach_position(object_search.target.position,
                                                     capture(sim, agent).robot_pose,
                                                     args.object_stand_off)
-                    navigator = DepthNavigation(goal_tolerance=0.25, max_depth=5.0,
+                    navigator = DepthNavigation(goal_tolerance=graph.visited_distance, max_depth=5.0,
                                                 camera_intrinsics=intrinsics)
                     latest = worker.last_result or result
                     navigator.set_data(object_goal, latest.depth, latest.observation.camera_pose)
@@ -755,6 +765,8 @@ def main():
         import magnum as mn
         from habitat_sim.utils.common import quat_from_magnum
         state.position = position
+        print(f'heading: {heading}')
+        # exit()
         state.rotation = quat_from_magnum(mn.Quaternion.rotation(
             mn.Rad(np.deg2rad(heading)), mn.Vector3(0.0, 1.0, 0.0)))
         agent.set_state(state)

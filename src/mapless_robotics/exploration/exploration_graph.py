@@ -97,7 +97,7 @@ class ExplorationGraph:
         max_vectical_vec=0.65,
         upward_pose="y",
         fusion_angle_degrees=30.0,
-        visited_distance=0.5,
+        visited_distance=0.1,
         u_gain_reduction_percentage=1.0,
         u_gain_threshold=0.1,
         enable_occupancy=True,
@@ -628,13 +628,36 @@ class ExplorationGraph:
         elif direction.shape != (2,):
             raise ValueError("look_ahead_vector must have 2 or 3 components, or be a 4x4 pose")
         direction_norm = float(np.linalg.norm(direction))
-        goal_norm = distance
-        if goal_norm == 0:
+        # A frontier's view direction is the orientation it should be seen
+        # from. Compare that with the robot camera's view direction; the
+        # bearing to the frontier is unrelated to the frontier's orientation.
+        frontier_direction = objective.vd
+        if frontier_direction is None and objective.pose6d is not None:
+            # OpenFrontier frontier poses use the CV convention (+Z forward).
+            frontier_direction = np.asarray(objective.pose6d, dtype=float)[:3, 2]
+        if frontier_direction is not None:
+            frontier_direction = np.asarray(frontier_direction, dtype=float)
+            if frontier_direction.shape == (3,):
+                frontier_direction = frontier_direction[self.plane_idx]
+        if distance == 0:
             self.retire(objective, 'reached')
             return self.select_frontier(pose) if self.auto_select_objective else None
-        if direction_norm == 0 or not np.isfinite(direction).all():
+        if (
+            direction_norm == 0
+            or not np.isfinite(direction).all()
+            or frontier_direction is None
+            or frontier_direction.shape != (2,)
+            or not np.isfinite(frontier_direction).all()
+        ):
             return objective
-        cosine = float(np.clip(np.dot(direction, to_goal) / (direction_norm * goal_norm), -1.0, 1.0))
+        frontier_norm = float(np.linalg.norm(frontier_direction))
+        if frontier_norm == 0:
+            return objective
+        cosine = float(np.clip(
+            np.dot(direction, frontier_direction) / (direction_norm * frontier_norm),
+            -1.0,
+            1.0,
+        ))
         angle = float(np.degrees(np.arccos(cosine)))
         if distance <= self.visited_distance and angle <= self.fusion_angle_degrees:
             self.retire(objective, 'reached')
