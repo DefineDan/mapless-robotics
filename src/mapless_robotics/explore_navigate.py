@@ -27,6 +27,7 @@ from .exploration.exploration import (
     camera_intrinsics,
 )
 from .exploration.exploration_graph import ExplorationGraph, PoseNode
+from .navigate.lotis_route_policy import compact_route_ids
 from .visualization.rerun_view import RerunView
 from .terminal_keyboard import TerminalKeyboard
 from .visualization.keys import action_for_key, key_name
@@ -307,8 +308,6 @@ def drive(
     target_yaw = None  # while set, turn in place towards it instead of using LoTIS
     progress_position = None
     stalled_steps = 0
-    endpoint_best_distance = None
-    endpoint_stalled_steps = 0
     for step in range(max_steps):
         iteration_started = time.perf_counter()
         observation = capture(sim, agent)
@@ -337,7 +336,6 @@ def drive(
             arrived = True
             target_yaw = goal_yaw
         if target_yaw is None:
-            policy_obs['goal_distance_m'] = distance
             action = method.act(policy_obs)
             method.visualize(policy_obs)
             diagnostics = getattr(method, "diagnostics", None)
@@ -346,19 +344,6 @@ def drive(
                 diagnostics['control_dt_s'] = 0.1
                 diagnostics['goal_distance_m'] = distance
                 diagnostics['goal_radius_m'] = goal_radius
-                if diagnostics.get('status') == 'endpoint_approach':
-                    if endpoint_best_distance is None or distance < endpoint_best_distance - 0.03:
-                        endpoint_best_distance = distance
-                        endpoint_stalled_steps = 0
-                    else:
-                        endpoint_stalled_steps += 1
-                    if endpoint_stalled_steps >= TAIL_STALL_STEPS:
-                        # The endpoint is in view but not getting closer: accept the arrival.
-                        print(f"Visible endpoint is not converging: {distance:.2f} m from goal; accepting")
-                        method.arrived = True
-                else:
-                    endpoint_best_distance = None
-                    endpoint_stalled_steps = 0
                 view.rr.log("pipeline/return_status", view.rr.TextDocument(str(diagnostics)))
                 if step % 20 == 0:
                     print(f"LoTIS return: {diagnostics}")
@@ -523,13 +508,21 @@ def navigate(
     max_steps: int,
     step_velocity: StepVelocity,
     turned: Turned,
+    goal_radius: float | None = GOAL_RADIUS,
 ) -> None:
-    """Reset to the start of the explored route and let LoTIS drive to its end."""
+    """Reset to the start of the explored route and let LoTIS drive to its end.
+
+    goal_radius=None ends only on the method's own arrival (LoTISRoutePolicy).
+    """
     view.set_paused(False)
     agent.set_state(states[0])
     view.rr.log("goal", view.rr.Image(frames[-1]).compress(jpeg_quality=90))
-    print("Encoding explored route...")
-    encode_route(method, frames, "forward", positions=[state.position for state in states])
+    # Drop in-place turns and near-duplicate poses so the encoder's frame budget is
+    # spread along the travelled path instead of clustering at scan spots.
+    travel_ids = compact_route_ids(list(range(len(frames))), states)
+    print(f"Encoding explored route: {len(frames)} recorded frames, {len(travel_ids)} travel frames")
+    encode_route(method, [frames[index] for index in travel_ids], "forward",
+                 positions=[states[index].position for index in travel_ids])
     # Startup scans can leave the first traveled segment outside the original
     # view. Face that segment before asking LoTIS to find its visual reference.
     initial_yaw = None
@@ -541,7 +534,8 @@ def navigate(
     print("Navigating with LoTIS; press q to stop")
     drive(
         sim, agent, method, states[-1].position, worker, graph, graph_output,
-        view, keyboard, max_steps, step_velocity, turned, initial_yaw=initial_yaw,
+        view, keyboard, max_steps, step_velocity, turned, goal_radius=goal_radius,
+        initial_yaw=initial_yaw,
     )
 
 

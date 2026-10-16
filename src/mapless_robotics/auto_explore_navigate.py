@@ -48,8 +48,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Odometry radius in metres, consulted only after LoTIS stops a return leg without
-# signalling arrival (endpoint is the nearest visible frame, see LoTISRoutePolicy).
+# Consulted only after LoTIS stops a return leg without signalling arrival (endpoint is
+# the nearest visible frame, see LoTISRoutePolicy): the leg is still accepted if the frame
+# LoTIS last localized the robot at was recorded within this distance of the end frame.
 ARRIVAL_BACKSTOP = 1.0  # metres
 # A forced return closer than this to its target viewpoint only closes the loop, without driving.
 SKIP_RETURN_RADIUS = 0.2  # metres
@@ -332,21 +333,19 @@ def explore(
                 )
             finally:
                 view.clear_route_overlay()
-            if not success:
-                observation = capture(sim, agent)
-                distance = np.linalg.norm((observation.robot_pose[:3, 3]
-                                           - target_position)[graph.plane_idx])
-                if distance > ARRIVAL_BACKSTOP:
-                    return False, None
-                print(f'LoTIS stopped without arriving; {distance:.2f} m from the goal '
-                      f'is within the backstop, accepting')
-            # Close the loop where LoTIS localized the robot, not at the nominal endpoint.
-            # Guard against a look-alike frame far along the route.
+            # Close the loop where LoTIS last localized the robot, not at the nominal endpoint.
+            # Every arrival signal implies that frame is near the end (see LoTISRoutePolicy).
             nearest = getattr(method, 'nearest_frame', None)
             reached = encoded_ids[nearest] if nearest is not None else endpoint
-            gap = np.linalg.norm((route.states[reached].position
-                                  - route.states[endpoint].position)[graph.plane_idx])
-            return True, reached if gap <= 1.0 else endpoint
+            if not success:
+                # Recorded poses of both frames, so live odometry drift does not enter.
+                gap = np.linalg.norm((route.states[reached].position
+                                      - route.states[endpoint].position)[graph.plane_idx])
+                if nearest is None or gap > ARRIVAL_BACKSTOP:
+                    return False, None
+                print(f'LoTIS stopped without arriving; last localized at frame {reached}, '
+                      f'{gap:.2f} m from the end frame is within the backstop, accepting')
+            return True, reached
 
         def pose_at(frame_index):
             return next((pose for pose in graph.poses.values()
@@ -825,7 +824,8 @@ def main():
                 agent.teleport(start_state)
                 navigate(sim, agent, method, [route.frames[i] for i in route.active],
                          [route.states[i] for i in route.active], None, graph,
-                         graph_output, view, keyboard, args.max_steps, step_velocity, turned)
+                         graph_output, view, keyboard, args.max_steps, step_velocity, turned,
+                         goal_radius=None)  # end on LoTIS arrival, not the odometry radius
     finally:
         try:
             if object_worker is not None:
