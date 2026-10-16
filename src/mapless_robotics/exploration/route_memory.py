@@ -12,17 +12,20 @@ class RecordedRoute:
     def __init__(self):
         self.frames = []
         self.states = []
+        # Simulator body poses per frame (4x4 or None), for evaluation only.
+        self.gt_poses = []
         self.active = []
         self.parents = []
         self.removed_branches = []
         self.pending_return = False
 
-    def append(self, frame, state):
+    def append(self, frame, state, gt_pose=None):
         import copy
 
         index = len(self.frames)
         self.frames.append(np.array(frame, copy=True))
         self.states.append(copy.deepcopy(state))
+        self.gt_poses.append(None if gt_pose is None else np.array(gt_pose, copy=True))
         self.parents.append(self.active[-1] if self.active else None)
         self.active.append(index)
         return index
