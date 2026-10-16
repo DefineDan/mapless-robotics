@@ -79,17 +79,29 @@ def configure_view(view: RerunView, *, object_search=False) -> None:
                 rrb.Spatial3DView(name="Exploration graph", origin="world"),
                 rrb.Vertical(
                     rrb.Spatial2DView(name="Live camera and LoTIS", origin="camera"),
-                    rrb.Spatial2DView(name="Detected frontiers", origin="detections"),
-                    rrb.Spatial2DView(name="Last recorded frame", origin="last_recorded_frame"),
-                    rrb.Spatial2DView(name="LoTIS goal", origin="goal"),
-                    rrb.Spatial2DView(name="Return viewpoint", origin="return_target/image"),
-                    rrb.TextDocumentView(name="Return target", origin="return_target/status"),
-                    *([rrb.Spatial2DView(name="Object detections", origin="object_search/image"),
-                       rrb.TextDocumentView(name="Object search", origin="object_search/status")]
-                      if object_search else []),
-                    rrb.Spatial2DView(
-                        name="Closest trajectory frame", origin="closest_trajectory_frame"
+                    rrb.Horizontal(
+                        rrb.Spatial2DView(name="Detected frontiers", origin="detections"),
+                        *([rrb.Spatial2DView(name="Object detections",
+                                             origin="object_search/image")]
+                          if object_search else []),
                     ),
+                    rrb.Horizontal(
+                        rrb.Spatial2DView(name="LoTIS goal", origin="goal"),
+                        rrb.Spatial2DView(
+                            name="Closest trajectory frame", origin="closest_trajectory_frame"
+                        ),
+                        rrb.Spatial2DView(name="Last recorded frame",
+                                          origin="last_recorded_frame"),
+                        rrb.Spatial2DView(name="Return viewpoint", origin="return_target/image",
+                                          visible=False),
+                    ),
+                    rrb.Horizontal(
+                        rrb.TextDocumentView(name="Return target", origin="return_target/status"),
+                        *([rrb.TextDocumentView(name="Object search",
+                                                origin="object_search/status")]
+                          if object_search else []),
+                    ),
+                    row_shares=[4, 2.5, 2, 1.5],
                 ),
                 column_shares=[2, 1],
             ),
