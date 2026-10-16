@@ -30,8 +30,8 @@ from .exploration.object_search import (
 from .exploration.route_memory import RecordedRoute
 from .exploration.view_scan import ViewScan, choose_start
 from .explore_navigate import (
-    ENTER, QUIT, changed_enough, configure_view, drive, encode_route,
-    make_parser as base_parser, navigate, yaw,
+    ENTER, QUIT, DriveOutcome, changed_enough, configure_view, drive, encode_retrieval,
+    encode_route, make_parser as base_parser, sweep_heading, yaw,
 )
 from .navigate.depth_navigation import DepthNavigation
 from .navigate.odometry import OdometryAgent
@@ -54,8 +54,160 @@ logger = logging.getLogger(__name__)
 ARRIVAL_BACKSTOP = 1.0  # metres
 # A forced return closer than this to its target viewpoint only closes the loop, without driving.
 SKIP_RETURN_RADIUS = 0.2  # metres
+# Automatic unstick attempts per return leg before the operator takes over (see plan_retry).
+AUTO_RETRIES = 2
 # turn_left steps (10 degrees each, see make_sim) for b to turn a stopped return around.
 TURN_AROUND_STEPS = 18
+
+
+
+def plan_retry(outcome, method, previous):
+    """Choose an automatic unstick behaviour for a LoTIS return leg stopped mid-route.
+
+    previous lists (kind, fold) of earlier retries on this leg. Returns
+    (kind, description, fold, (window centre, back, ahead)) for
+    LoTISRoutePolicy.set_window; kind None leaves the leg to the operator and the
+    description says why. Frames are indices into the encoded route, like the
+    policy diagnostics.
+    """
+    if outcome not in (DriveOutcome.LOST, DriveOutcome.STALLED):
+        return None, f'drive {outcome.value}', None, None
+    nearest = getattr(method, 'nearest_frame', None)
+    if nearest is None or getattr(method, 'route_lengths', None) is None:
+        return None, 'LoTIS never localized the robot on this route', None, None
+    if method.in_tail:
+        return None, 'stopped in the last metre of the route', None, None
+    fold = method.find_fold()
+    if fold is None:
+        # After a first U-turn retry the window hides the other leg, so the
+        # oscillation is gone; reuse that fold while the robot is still matched in it.
+        earlier = next((f for _, f in reversed(previous) if f is not None), None)
+        if earlier is not None:
+            a, b = earlier
+            if -1.0 <= method.along_offset(nearest, origin=a) <= method.along_offset(b, origin=a) + 1.0:
+                fold = earlier
+    if fold is not None:
+        a, b = fold
+        if not any(kind == 'u_turn' for kind, _ in previous):
+            # Hide the other leg: it starts more than half the fold's path length ahead.
+            separation = method.along_offset(b, origin=a)
+            return ('u_turn', f'U-turn, matches jump between frames {a} and {b}; following the U',
+                    fold, (a, 0.5, min(2.0, separation / 2)))
+        return ('u_turn', f'U-turn between frames {a} and {b}; cutting across to frame {b}',
+                fold, (b, 0.5, 2.0))
+    tracking = method.diagnostics.get('status') in ('tracking', 'endpoint_approach')
+    if (outcome is DriveOutcome.STALLED and tracking
+            and method.diagnostics.get('linear_mps', 0.) > 0):
+        return None, ('route in view but the robot is not moving forward, likely an obstacle '
+                      '(no automatic behaviour yet)'), None, None
+    problem = 'stuck turning in place' if tracking else 'lost the route'
+    if not any(kind == 'reorient' for kind, _ in previous):
+        return ('reorient', f'{problem} near frame {nearest}; sweeping for the route',
+                None, (nearest, 0.5, 2.0))
+    return ('reorient', f'{problem} near frame {nearest}; sweeping with a wider window',
+            None, (nearest, 1.0, 4.0))
+
+
+def drive_with_retries(sim, agent, method, target_position, graph, graph_output, view, keyboard,
+                       max_steps, step_velocity, turned, goal_yaw=None, turn_around=False,
+                       initial_yaw=None):
+    """drive() the encoded route, then up to AUTO_RETRIES automatic unstick attempts.
+
+    Each retry turns a full circle to the best view (sweep_heading) and continues the
+    same encoding inside a localization window chosen by plan_retry.
+    """
+    outcome = drive(
+        sim, agent, method, target_position, None, graph, graph_output, view, keyboard,
+        max_steps, step_velocity, turned, goal_yaw=goal_yaw, turn_around=turn_around,
+        goal_radius=None, initial_yaw=initial_yaw,
+    )
+    previous = []
+    for attempt in range(1, AUTO_RETRIES + 1):
+        kind, description, fold, window = plan_retry(outcome, method, previous)
+        if kind is None:
+            if not outcome and outcome is not DriveOutcome.CANCELLED:
+                print(f'No automatic retry: {description}')
+            break
+        previous.append((kind, fold))
+        print(f'Auto-retry {attempt}/{AUTO_RETRIES}: {description}')
+        view.rr.log('pipeline/return_status', view.rr.TextDocument(
+            f'auto_retry {attempt}/{AUTO_RETRIES}: {description}'))
+        method.set_window(*window)
+        score = sweep_heading(sim, agent, method, view, keyboard)
+        if score is None:
+            return DriveOutcome.CANCELLED
+        if score <= 0:
+            print('Sweep found no usable route frame')
+            continue
+        # Continue the same encoded route; the window stays on until it ends.
+        method.resume()
+        outcome = drive(
+            sim, agent, method, target_position, None, graph, graph_output, view, keyboard,
+            max_steps, step_velocity, turned, goal_yaw=goal_yaw, goal_radius=None,
+        )
+    return outcome
+
+
+def nudge(sim, key):
+    """Move the robot for a key while a LoTIS drive is stopped; True if the key moved it.
+
+    Arrows move, a/d turn, b turns around. Moves are not recorded, and the camera
+    pitch stays fixed so LoTIS can still match.
+    """
+    if key == ord('b'):
+        for _ in range(TURN_AROUND_STEPS):
+            sim.step('turn_left')
+        return True
+    action = action_for_key(key_name(key))
+    if action is None or action in ('look_up', 'look_down'):
+        return False
+    sim.step(action)
+    return True
+
+
+def retrieve(sim, agent, method, route, graph, graph_output, view, keyboard, args,
+             step_velocity, turned, start_state):
+    """Drive the explored route from the start to its end with LoTIS.
+
+    A stopped drive pauses like a stopped return: nudge the robot, r retries LoTIS
+    from here with a fresh encoding (and new automatic retries), q quits.
+    Returns True on arrival.
+    """
+    frames = [route.frames[index] for index in route.active]
+    states = [route.states[index] for index in route.active]
+    # The follower starts at the true start with fresh odometry, which is
+    # where the explorer's odometry frame began (route frame 0).
+    agent.teleport(start_state)
+    agent.set_state(states[0])
+    view.set_paused(False)
+    view.rr.log('goal', view.rr.Image(frames[-1]).compress(jpeg_quality=90))
+    initial_yaw = encode_retrieval(method, frames, states)
+    print('Retrieving with LoTIS; press q to stop')
+    while True:
+        try:
+            outcome = drive_with_retries(
+                sim, agent, method, states[-1].position, graph, graph_output, view, keyboard,
+                args.max_steps, step_velocity, turned, initial_yaw=initial_yaw)
+        finally:
+            view.clear_route_overlay()
+        if outcome:
+            print('Retrieval complete')
+            return True
+        view.set_paused(True)
+        print('Retrieval stopped. Arrows move, a/d turn, b turns around, '
+              'r retries LoTIS from here, q quits')
+        while True:
+            view.start_step()
+            view.log_camera(capture(sim, agent), time.monotonic(), graph=graph)
+            key = keyboard.poll()
+            if key in QUIT:
+                return False
+            if key == ord('r'):
+                break
+            nudge(sim, key)
+        view.set_paused(False)
+        encode_retrieval(method, frames, states)
+        initial_yaw = None  # retry from the operator's heading
 
 
 def make_parser():
@@ -325,14 +477,14 @@ def explore(
             print(f'LoTIS {tracking} to frame '
                   f'{frame_ids[0] if tracking == "backward" else frame_ids[-1]}; press q to stop')
             try:
-                success = drive(
-                    sim, agent, method, target_position, None, graph,
-                    graph_output, view, keyboard, args.max_steps, step_velocity, turned,
-                    goal_yaw=target_yaw, turn_around=turn, goal_radius=None,
-                    initial_yaw=initial_yaw,
+                outcome = drive_with_retries(
+                    sim, agent, method, target_position, graph, graph_output, view, keyboard,
+                    args.max_steps, step_velocity, turned, goal_yaw=target_yaw,
+                    turn_around=turn, initial_yaw=initial_yaw,
                 )
             finally:
                 view.clear_route_overlay()
+            success = bool(outcome)
             # Close the loop where LoTIS last localized the robot, not at the nominal endpoint.
             # Every arrival signal implies that frame is near the end (see LoTISRoutePolicy).
             nearest = getattr(method, 'nearest_frame', None)
@@ -466,13 +618,7 @@ def explore(
                 discovery_done = False
         if recovery is not None:
             # A stopped return waits for the operator: nudge the robot, then r retries from here.
-            # Moves are not recorded, and the camera pitch stays fixed so LoTIS can still match.
-            action = action_for_key(key_name(key))
-            if key == ord('b'):
-                for _ in range(TURN_AROUND_STEPS):
-                    sim.step('turn_left')
-            elif action is not None and action not in ('look_up', 'look_down'):
-                sim.step(action)
+            nudge(sim, key)
             continue
         if key == ord('o') and object_goal is not None:
             collect(wait=True)
@@ -819,13 +965,8 @@ def main():
                 object_worker = None
             save_run(route, graph, args.run_dir, graph_output)
             if found and len(route.active) >= 2:
-                # The follower starts at the true start with fresh odometry, which is
-                # where the explorer's odometry frame began (route frame 0).
-                agent.teleport(start_state)
-                navigate(sim, agent, method, [route.frames[i] for i in route.active],
-                         [route.states[i] for i in route.active], None, graph,
-                         graph_output, view, keyboard, args.max_steps, step_velocity, turned,
-                         goal_radius=None)  # end on LoTIS arrival, not the odometry radius
+                retrieve(sim, agent, method, route, graph, graph_output, view, keyboard,
+                         args, step_velocity, turned, start_state)
     finally:
         try:
             if object_worker is not None:

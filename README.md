@@ -547,6 +547,30 @@ for 80 driving steps. A stopped return pauses for `r` and keeps the archived rou
 These are visual-policy safeguards, not a simulator shortest-path fallback, and
 they do not guarantee LoTIS can localize every backward view.
 
+Before pausing, a leg stopped mid-route (lost or stalled, outside the last metre)
+gets up to 2 automatic retries (`plan_retry`), each without re-encoding the leg:
+
+- **U-turn:** LoTIS's nearest frame repeatedly jumps between two frames at least
+  1.5 m apart along the recorded route but within 1.5 m in space, i.e. both legs of
+  a U are in view. The first retry follows the U: matching is restricted to a window
+  from 0.5 m behind the earlier frame to half the fold's path length ahead, so the
+  other leg cannot be matched. The second retry cuts across, with the window
+  centred on the frame on the other leg.
+- **Lost / corner:** a window around the last matched frame (0.5 m back, 2 m ahead;
+  1 m / 4 m on the second retry).
+- Each retry first turns a full circle in 10-degree steps, scoring the view with
+  LoTIS every 30 degrees (visibility of in-window frames ahead), and faces the best
+  view. The window then slides with the robot until the leg ends. While it is on,
+  a turn in place keeps its direction until a target is within 20 degrees, so a
+  target switching sides between frames cannot make the robot turn back and forth.
+  Normal tracking (no window) is unchanged.
+- A leg stalled with the route still in view (likely an obstacle), a cancelled leg
+  (`q`, also during the sweep), and the step limit are left to the operator. `r`
+  starts a fresh leg without a window and with new retries.
+- Final retrieval uses the same automatic retries. If it still stops, it pauses
+  like a stopped return: arrows move, a/d turn, b turns around, `r` re-encodes the
+  route and retries LoTIS from the current pose, `q` quits.
+
 The terminal prints return-reference frame counts and LoTIS status periodically.
 Rerun's `pipeline/return_status` includes `tracking`, `searching`,
 `no_visible_lookahead`, `endpoint_approach` or `lost_stop`, plus visible-point counts and the encoded
