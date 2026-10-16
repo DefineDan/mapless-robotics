@@ -498,8 +498,9 @@ Outputs live in `runs/auto_explore_navigate/<timestamp>/` (or `--run-dir`):
   (`--graph-output` can place the graph elsewhere).
 
 The automatic launcher wraps LoTIS with a guarded visual policy for return and
-retrieval. Return references omit intermediate stationary/near-duplicate poses
-(0.15 m spacing, retaining both endpoints). The initial backward alignment follows
+retrieval. Return and retrieval references omit intermediate stationary/near-duplicate
+poses (0.15 m spacing, retaining both endpoints), so in-place scans do not use up
+the encoder's frame budget and leave large gaps elsewhere on the route. The initial backward alignment follows
 the recorded travel direction rather than blindly turning 180 degrees from the
 current heading. Steering requires finite image-space predictions inside the
 camera view with visibility above the configured threshold. It skips projected
@@ -520,12 +521,15 @@ LoTIS's distance head outputs normalized values in [0, 1]; these are used to ran
 closest frames, not interpreted as metres for this lookahead. If reference
 positions are absent, the wrapper retains its relative-distance fallback.
 
-Near the endpoint, slowdown uses measured simulator distance when available:
-it tapers speed inside 0.75 m instead of creeping at 0.05 m/s because of a small
-normalized prediction while physically farther away. The older 0.05 m/s fallback
-is retained for callers that do not provide a measured distance. Arrival still
-uses measured simulator distance. An endpoint approach that fails to reduce the
-measured goal distance by 0.03 m for 60 steps stops for retry.
+The endpoint logic does not use the live pose. Arrival means the endpoint is
+LoTIS's nearest visible route frame for 3 consecutive steps. Near the endpoint,
+slowdown uses the recorded path length remaining from the frame LoTIS localizes
+the robot at (`remaining_m`): it tapers speed inside the last 0.5 m instead of
+creeping at 0.05 m/s because of a small normalized prediction. The 0.05 m/s
+fallback is retained for references without positions. If an endpoint approach
+does not localize the robot 0.03 m further along the route for 60 forward-driving
+steps (turning in place does not count), the arrival is accepted (`endpoint_stalled`). Final retrieval also ends on this
+LoTIS arrival, not on a radius around the recorded end position.
 
 LoTIS runs synchronously: each prediction advances the simulator by 0.1 simulated
 seconds. Slow inference therefore produces slower playback than the configured
@@ -542,6 +546,30 @@ When no usable route point is visible, the agent searches in place and stops aft
 for 80 driving steps. A stopped return pauses for `r` and keeps the archived route.
 These are visual-policy safeguards, not a simulator shortest-path fallback, and
 they do not guarantee LoTIS can localize every backward view.
+
+Before pausing, a leg stopped mid-route (lost or stalled, outside the last metre)
+gets up to 2 automatic retries (`plan_retry`), each without re-encoding the leg:
+
+- **U-turn:** LoTIS's nearest frame repeatedly jumps between two frames at least
+  1.5 m apart along the recorded route but within 1.5 m in space, i.e. both legs of
+  a U are in view. The first retry follows the U: matching is restricted to a window
+  from 0.5 m behind the earlier frame to half the fold's path length ahead, so the
+  other leg cannot be matched. The second retry cuts across, with the window
+  centred on the frame on the other leg.
+- **Lost / corner:** a window around the last matched frame (0.5 m back, 2 m ahead;
+  1 m / 4 m on the second retry).
+- Each retry first turns a full circle in 10-degree steps, scoring the view with
+  LoTIS every 30 degrees (visibility of in-window frames ahead), and faces the best
+  view. The window then slides with the robot until the leg ends. While it is on,
+  a turn in place keeps its direction until a target is within 20 degrees, so a
+  target switching sides between frames cannot make the robot turn back and forth.
+  Normal tracking (no window) is unchanged.
+- A leg stalled with the route still in view (likely an obstacle), a cancelled leg
+  (`q`, also during the sweep), and the step limit are left to the operator. `r`
+  starts a fresh leg without a window and with new retries.
+- Final retrieval uses the same automatic retries. If it still stops, it pauses
+  like a stopped return: arrows move, a/d turn, b turns around, `r` re-encodes the
+  route and retries LoTIS from the current pose, `q` quits.
 
 The terminal prints return-reference frame counts and LoTIS status periodically.
 Rerun's `pipeline/return_status` includes `tracking`, `searching`,
@@ -631,12 +659,14 @@ where wheels turn without the robot moving.
 | Stuck detection (`RecoveryBehaviour.is_stuck`) | robot pose history | Still works here because the model measures real motion. With real wheel slip, a stuck robot would look like it was moving. |
 | Route recording spacing (`changed_enough`, 0.2 m / 15°) | recorded states | Frame spacing becomes slightly irregular. Harmless. |
 | LoTIS route geometry (`compact_route_ids`, `route_positions`, initial yaw) | recorded odometry states | Drift is locally consistent, so this is mostly robust. Long legs get distorted lookahead lengths. |
-| LoTIS `goal_distance_m` and the `drive` stall / endpoint logic | live position vs goal position | Endpoint slowdown triggers in the wrong place, and the "accepting" fallbacks fire early or late. This is the biggest risk on return legs. |
-| `ARRIVAL_BACKSTOP` (1 m), loop-closure gap check (1 m), `SKIP_RETURN_RADIUS` (0.2 m) | positions | Incomplete returns are accepted or complete ones rejected, and the loop is closed at the wrong archive frame. |
+| LoTIS endpoint slowdown and `endpoint_stalled` (`LoTISRoutePolicy`) | recorded route positions from LoTIS's nearest frame | Not affected by live drift. Only the recorded leg lengths are distorted, as above. |
+| `drive` tail no-progress accept (`in_tail`, 0.1 m over 40 steps) | live relative motion | Still works here because the model measures real motion. With real wheel slip, a stuck robot would look like it was moving. |
+| `ARRIVAL_BACKSTOP` (1 m) and loop-closure frame | recorded poses of LoTIS's last localized frame and the leg's end frame | Not affected by live drift. Depends on LoTIS localizing correctly. |
+| `SKIP_RETURN_RADIUS` (0.2 m) | current position vs pose node | A return is skipped although the robot is not at the viewpoint, or driven although it is. |
 | `restore_view` | recorded heading | The robot turns to the *believed* heading, so the true view is off by the yaw drift. LoTIS and the fresh depth start misaligned. |
 | `ViewScan` headings | yaw | Scan directions are unevenly spaced. Minor. |
 | Object search (`detection_position`, 0.75 m consistency radius, `approach_position`, approach controller) | camera and robot pose | Confirmations taken far apart in time stop agreeing, and the approach point is offset by the drift. |
-| Retrieval (`navigate`, `drive` goal = last recorded odometry position) | explorer odometry vs follower odometry | Goal radius and goal distance compare two independently drifting frames. |
+| Retrieval (`navigate`) | none for arrival (`goal_radius=None`) | Ends on LoTIS arrival. `goal_distance_m` (explorer vs follower odometry) is only logged. |
 | Start pose (`choose_start`, navmesh) | ground truth by design | Not affected; this is simulator setup. |
 
 Simulator stepping (`sim.step`, `step_filter` collisions) and plotting
