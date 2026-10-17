@@ -70,7 +70,8 @@ def should_recover(frontier, target, current_position, *,
     ``confidence`` mode recovers when the selected viewpoint is farther
     than the confidence radius. ``graph_distance`` mode avoids recovery
     when the viewpoint is close in route steps and the robot is closer to
-    the frontier than that viewpoint is.
+    the frontier than that viewpoint is. A graph distance threshold of -1
+    disables the route-step check and compares only frontier distances.
     """
     current_position = np.asarray(current_position, dtype=float).reshape(3)
     target_position = np.asarray(target.pose[:3, 3], dtype=float).reshape(3)
@@ -84,6 +85,8 @@ def should_recover(frontier, target, current_position, *,
 
         print(f"current_to_frontier: {current_to_frontier}, target_to_frontier: {target_to_frontier}, distance_node_to_node: {distance_node_to_node}, distance_node_to_node_th: {distance_node_to_node_th}")
 
+        if distance_node_to_node_th == -1:
+            return bool(current_to_frontier >= target_to_frontier)
         return not (distance_node_to_node < distance_node_to_node_th
                     and current_to_frontier < target_to_frontier)
     raise ValueError("mode must be 'confidence' or 'graph_distance'")

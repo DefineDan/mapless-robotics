@@ -79,7 +79,7 @@ def make_parser():
                         default='graph_distance', help='Rule used to decide when to recover')
     parser.add_argument('--confidence-dist-th', type=float, default=0.5,
                         help='Viewpoint distance threshold in confidence mode (metres)')
-    parser.add_argument('--distance-node-to-node-th', type=float, default=100,
+    parser.add_argument('--distance-node-to-node-th', type=float, default=-1,
                         help='Route step threshold in graph-distance mode')
     parser.add_argument('--object-query', help='Object or functional request, e.g. "a place to sit"')
     parser.add_argument('--no-qwen', action='store_true',
