@@ -9,6 +9,7 @@ While a recovery is stopped, arrows move, a/d turn and b turns around before r r
 from __future__ import annotations
 
 import argparse
+import csv
 import copy
 import json
 import logging
@@ -27,7 +28,7 @@ from .exploration.goal_query import MODEL as QUERY_MODEL, translate_goal
 from .exploration.object_search import (
     DEFAULT_MODEL, ObjectSearch, ObjectSearchWorker, OWLv2Detector, approach_position,
 )
-from .exploration.route_memory import RecordedRoute, camera_forward
+from .exploration.route_memory import RecordedRoute, camera_forward as state_camera_forward
 from .exploration.view_scan import ViewScan, choose_start
 from .explore_navigate import (
     ENTER, QUIT, DriveOutcome, changed_enough, configure_view, drive, encode_retrieval,
@@ -185,7 +186,25 @@ def retrieve(sim, agent, method, route, graph, graph_output, view, keyboard, arg
     agent.set_state(states[0])
     view.set_paused(False)
     view.rr.log('goal', view.rr.Image(frames[-1]).compress(jpeg_quality=90))
-    initial_yaw = encode_retrieval(method, frames, states)
+
+    def encode_and_record(purpose):
+        travel_indices = compact_route_ids(list(range(len(frames))), states)
+        encoded_indices = np.linspace(
+            0, len(travel_indices) - 1,
+            min(len(travel_indices), method.localizer.max_seq_len), dtype=int)
+        travel_ids = [route_ids[index] for index in travel_indices]
+        encoded_ids = [travel_ids[index] for index in encoded_indices]
+        encoding_record = {
+            'purpose': purpose, 'chunk_index': 0, 'tracking_mode': 'forward',
+            'source_frame_ids': travel_ids, 'encoded_frame_ids': encoded_ids,
+            'target_frame_id': route_ids[-1],
+        }
+        route.lotis_encodings.append(encoding_record)
+        initial_yaw = encode_retrieval(method, frames, states)
+        view.log_lotis_frames(route.states, encoded_ids, purpose=purpose)
+        return initial_yaw, encoding_record
+
+    initial_yaw, encoding_record = encode_and_record('retrieval')
     print('Retrieving with LoTIS; press q to stop')
     while True:
         try:
@@ -194,6 +213,13 @@ def retrieve(sim, agent, method, route, graph, graph_output, view, keyboard, arg
                 args.max_steps, step_velocity, turned, initial_yaw=initial_yaw)
         finally:
             view.clear_route_overlay()
+        nearest = getattr(method, 'nearest_frame', None)
+        encoding_record.update(
+            outcome=outcome.value,
+            last_localized_frame_id=(encoding_record['encoded_frame_ids'][nearest]
+                                     if nearest is not None else None),
+            diagnostics=dict(getattr(method, 'diagnostics', {})),
+        )
         if outcome:
             print('Retrieval complete')
             return True
@@ -210,7 +236,7 @@ def retrieve(sim, agent, method, route, graph, graph_output, view, keyboard, arg
                 break
             nudge(sim, key)
         view.set_paused(False)
-        encode_retrieval(method, frames, states)
+        _, encoding_record = encode_and_record('retrieval_retry')
         initial_yaw = None  # retry from the operator's heading
 
 
@@ -289,6 +315,80 @@ def save_run(route, graph, run_dir, graph_output):
         for output_index, frame_index in enumerate(indices):
             path = destination / f'{output_index:06d}.png'
             Image.fromarray(route.frames[frame_index]).save(path)
+    metadata_path = run_dir / 'archive' / 'frames.csv'
+    with metadata_path.open('w', newline='') as stream:
+        fields = ('frame_id', 'image', 'timestamp', 'active', 'parent_id',
+                  'odometry_x', 'odometry_y', 'odometry_z', 'camera_x', 'camera_y', 'camera_z',
+                  'camera_forward_x', 'camera_forward_y', 'camera_forward_z',
+                  'capture_robot_x', 'capture_robot_y', 'capture_robot_z',
+                  'state_capture_position_error_m', 'state_capture_view_error_deg',
+                  'ground_truth_x', 'ground_truth_y', 'ground_truth_z')
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        active = set(route.active)
+        for frame_id, (state, capture) in enumerate(zip(route.states, route.frame_metadata)):
+            odometry_position = np.asarray(state.position, dtype=float)
+            robot_matrix = capture['robot_pose']
+            capture_position = ([None] * 3 if robot_matrix is None else
+                                np.asarray(robot_matrix, dtype=float)[:3, 3].tolist())
+            position_error = (None if robot_matrix is None else
+                              float(np.linalg.norm(odometry_position - capture_position)))
+            camera_matrix = capture['camera_pose']
+            camera_position = ([None] * 3 if camera_matrix is None else
+                               np.asarray(camera_matrix, dtype=float)[:3, 3].tolist())
+            forward = ([None] * 3 if camera_matrix is None else
+                       (np.asarray(camera_matrix, dtype=float)[:3, :3] @ np.array([0., 0., -1.])).tolist())
+            view_error = None
+            if camera_matrix is not None:
+                camera_forward = np.asarray(forward, dtype=float)
+                state_forward = state_camera_forward(state)
+                view_cosine = np.clip(np.dot(camera_forward, state_forward), -1.0, 1.0)
+                view_error = float(np.rad2deg(np.arccos(view_cosine)))
+            truth_position = (None if route.gt_poses[frame_id] is None else
+                              np.asarray(route.gt_poses[frame_id], dtype=float)[:3, 3].tolist())
+            writer.writerow({
+                'frame_id': frame_id,
+                'image': f'{frame_id:06d}.png',
+                'timestamp': capture['timestamp'],
+                'active': frame_id in active,
+                'parent_id': route.parents[frame_id],
+                'odometry_x': odometry_position[0], 'odometry_y': odometry_position[1],
+                'odometry_z': odometry_position[2],
+                'camera_x': camera_position[0], 'camera_y': camera_position[1],
+                'camera_z': camera_position[2],
+                'camera_forward_x': forward[0], 'camera_forward_y': forward[1],
+                'camera_forward_z': forward[2],
+                'capture_robot_x': capture_position[0], 'capture_robot_y': capture_position[1],
+                'capture_robot_z': capture_position[2],
+                'state_capture_position_error_m': position_error,
+                'state_capture_view_error_deg': view_error,
+                'ground_truth_x': None if truth_position is None else truth_position[0],
+                'ground_truth_y': None if truth_position is None else truth_position[1],
+                'ground_truth_z': None if truth_position is None else truth_position[2],
+            })
+    encoding_path = run_dir / 'archive' / 'lotis_encodings.csv'
+    with encoding_path.open('w', newline='') as stream:
+        fields = ('purpose', 'chunk_index', 'tracking_mode', 'slot', 'frame_id', 'image',
+                  'encoded', 'target_frame_id', 'outcome', 'last_status',
+                  'last_localized_frame_id')
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for encoding in route.lotis_encodings:
+            encoded_ids = set(encoding['encoded_frame_ids'])
+            for slot, frame_id in enumerate(encoding['source_frame_ids']):
+                writer.writerow({
+                    'purpose': encoding['purpose'],
+                    'chunk_index': encoding['chunk_index'],
+                    'tracking_mode': encoding['tracking_mode'],
+                    'slot': slot,
+                    'frame_id': frame_id,
+                    'image': f'{frame_id:06d}.png',
+                    'encoded': frame_id in encoded_ids,
+                    'target_frame_id': encoding.get('target_frame_id'),
+                    'outcome': encoding.get('outcome'),
+                    'last_status': encoding.get('diagnostics', {}).get('status'),
+                    'last_localized_frame_id': encoding.get('last_localized_frame_id'),
+                })
 
 
 def explore(
@@ -344,12 +444,20 @@ def explore(
                 approach_position=None if object_goal is None else object_goal.tolist(),
                 reached=object_reached, observing_frame_index=object_frame_index)
 
+    def archive_observation(observation, state):
+        frame_index = route.append(
+            observation.rgb, state, observation.gt_robot_pose,
+            timestamp=observation.timestamp, robot_pose=observation.robot_pose,
+            camera_pose=observation.camera_pose, gt_camera_pose=observation.gt_camera_pose,
+        )
+        return frame_index
+
     def offer_analysis(observation, state, key):
         nonlocal force_analysis, discovery_frame
         now = time.monotonic()
         if force_analysis or key == ord('f') or worker.trigger.due(observation, now):
             if not worker.busy:
-                index = route.append(observation.rgb, state, observation.gt_robot_pose)
+                index = archive_observation(observation, state)
                 if worker.submit(observation, now, manual=force_analysis or key == ord('f'),
                                  frame_index=index, depth_only=False):
                     discovery_frame = index
@@ -506,9 +614,20 @@ def explore(
                     method, chunk_frames, tracking,
                     positions=[route.states[index].position for index in chunk_ids])
                 encoded_ids = [chunk_ids[index] for index in encoded_indices]
+                view.log_lotis_frames(
+                    route.states, encoded_ids,
+                    purpose=f'{tracking} chunk {chunk_index + 1}/{len(chunks)}',
+                )
+                encoding_record = {
+                    'purpose': 'return', 'chunk_index': chunk_index,
+                    'tracking_mode': tracking, 'source_frame_ids': chunk_ids,
+                    'encoded_frame_ids': encoded_ids,
+                    'target_frame_id': endpoint,
+                }
+                route.lotis_encodings.append(encoding_record)
                 endpoint_position = route.states[endpoint].position
                 is_final_chunk = chunk_index == len(chunks) - 1
-                forward = camera_forward(route.states[endpoint])
+                forward = state_camera_forward(route.states[endpoint])
                 chunk_goal_yaw = target_yaw if is_final_chunk else float(
                     np.arctan2(-forward[0], -forward[2]))
                 chunk_initial_yaw = None
@@ -544,6 +663,11 @@ def explore(
                     view.clear_route_overlay()
                 nearest = getattr(method, 'nearest_frame', None)
                 reached = encoded_ids[nearest] if nearest is not None else endpoint
+                encoding_record.update(
+                    outcome=outcome.value,
+                    last_localized_frame_id=(encoded_ids[nearest] if nearest is not None else None),
+                    diagnostics=dict(getattr(method, 'diagnostics', {})),
+                )
                 if not outcome:
                     gap = np.linalg.norm((route.states[reached].position
                                           - route.states[endpoint].position)[graph.plane_idx])
@@ -622,7 +746,7 @@ def explore(
         view.log_camera(observation, time.monotonic(), graph=graph)
         if recovery is None and changed_enough(
                 state, route.states[route.active[-1]] if route.active else None, turned):
-            index = route.append(observation.rgb, state, observation.gt_robot_pose)
+            index = archive_observation(observation, state)
             view.log('last_recorded_frame', view.rr.Image(route.frames[index]))
         collect()
         collect_objects()
@@ -635,7 +759,7 @@ def explore(
                       'or find an alternative with f and resume with Space')
                 continue
             collect(wait=True)
-            route.append(observation.rgb, state, observation.gt_robot_pose)
+            archive_observation(observation, state)
             if object_search is not None and not object_reached:
                 object_search.status = 'Found (operator confirmed)'
                 object_metadata()
@@ -733,7 +857,7 @@ def explore(
                             paused = True
                             view.set_paused(paused)
                             object_search.status = 'Found; press Enter to retrieve or o to dismiss'
-                            route.append(observation.rgb, state, observation.gt_robot_pose)
+                            archive_observation(observation, state)
                             print(f'Found {object_search.target.label}; paused. '
                                   'Enter starts LoTIS retrieval, o dismisses the object')
                     else:
@@ -780,7 +904,7 @@ def explore(
                 now = time.monotonic()
                 angular, ready = scan.command(yaw(observation.robot_pose))
                 if ready and not worker.busy:
-                    index = route.append(observation.rgb, state, observation.gt_robot_pose)
+                    index = archive_observation(observation, state)
                     if worker.submit(observation, now, manual=True, frame_index=index):
                         scan.waiting_frame = index
                 elif angular and now >= next_control:
@@ -841,7 +965,7 @@ def explore(
         # analysis while stationary. The worker keeps just one capture in flight.
         if force_analysis or key == ord('f') or worker.trigger.due(observation, now):
             if not worker.busy:
-                index = route.append(observation.rgb, state, observation.gt_robot_pose)
+                index = archive_observation(observation, state)
                 if worker.submit(observation, now, manual=force_analysis or key == ord('f'),
                                  frame_index=index, depth_only=False):
                     discovery_frame = index

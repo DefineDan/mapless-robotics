@@ -26,6 +26,8 @@ class RecordedRoute:
             raise ValueError('heading_weight must be finite and non-negative')
         self.frames = []
         self.states = []
+        self.frame_metadata = []
+        self.lotis_encodings = []
         # Simulator body poses per frame (4x4 or None), for evaluation only.
         self.gt_poses = []
         self.active = []
@@ -64,7 +66,8 @@ class RecordedRoute:
         self.adjacency[first][second] = edge
         self.adjacency[second][first] = edge
 
-    def append(self, frame, state, gt_pose=None):
+    def append(self, frame, state, gt_pose=None, *, timestamp=None, robot_pose=None,
+               camera_pose=None, gt_camera_pose=None):
         import copy
 
         position = np.asarray(state.position, dtype=float)
@@ -74,6 +77,14 @@ class RecordedRoute:
         self.frames.append(np.array(frame, copy=True))
         self.states.append(copy.deepcopy(state))
         self.gt_poses.append(None if gt_pose is None else np.array(gt_pose, copy=True))
+        self.frame_metadata.append({
+            'timestamp': None if timestamp is None else float(timestamp),
+            'robot_pose': None if robot_pose is None else np.array(robot_pose, dtype=float, copy=True).tolist(),
+            'camera_pose': None if camera_pose is None else np.array(camera_pose, dtype=float, copy=True).tolist(),
+            'ground_truth_robot_pose': None if gt_pose is None else np.array(gt_pose, dtype=float, copy=True).tolist(),
+            'ground_truth_camera_pose': (None if gt_camera_pose is None else
+                                         np.array(gt_camera_pose, dtype=float, copy=True).tolist()),
+        })
         self.parents.append(self.active[-1] if self.active else None)
         self.adjacency.append({})
 
@@ -152,6 +163,8 @@ class RecordedRoute:
                 'removed_branches': self.removed_branches,
                 'archive_frame_count': len(self.frames),
                 'archive_parent_ids': self.parents,
+                'frame_metadata': self.frame_metadata,
+                'lotis_encodings': self.lotis_encodings,
                 'route_edges': self.edges,
                 'route_connect_distance': self.connect_distance,
                 'route_heading_weight': self.heading_weight}

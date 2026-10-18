@@ -9,6 +9,7 @@ from ..terminal_keyboard import TerminalKeyboard
 from .keys import action_for_key, key_name
 from ..exploration.exploration import camera_intrinsics
 from ..exploration.object_search import detection_position
+from ..exploration.route_memory import camera_forward as state_camera_forward
 
 
 OVERLAY_HEIGHT = 0.05
@@ -577,6 +578,26 @@ class RerunView:
                         labels=[f"junction frame {junction_frame}"], show_labels=True),
         )
 
+    def log_lotis_frames(self, states, frame_ids, *, purpose="LoTIS"):
+        """Draw poses only for archived images used by the current LoTIS encoding."""
+        if not frame_ids:
+            self.rr.log("world/lotis_encoded_frames", self.rr.Clear(recursive=True))
+            return
+        positions = np.asarray([states[index].position for index in frame_ids], dtype=float)
+        positions = on_overlay(positions, self.vertical_index, self.overlay_height + 0.1)
+        entity = "world/lotis_encoded_frames"
+        self.rr.log(entity, self.rr.Clear(recursive=True))
+        self.rr.log(entity, self.rr.Points3D(
+            positions, colors=[(255, 220, 55)], radii=0.045,
+            labels=[f"{purpose} frame {index}" for index in frame_ids], show_labels=True,
+        ))
+        camera_directions = np.asarray([
+            state_camera_forward(states[index]) * 0.2 for index in frame_ids
+        ])
+        self.rr.log(f"{entity}/camera_forward", self.rr.Arrows3D(
+            origins=positions, vectors=camera_directions, colors=[(255, 220, 55)],
+        ))
+
     def log_route_chunks(self, chunks, states, *, active_chunk=None):
         """Draw LoTIS route chunks and their handoff frames in the world view."""
         if self.paused:
@@ -623,6 +644,7 @@ class RerunView:
         for entity in ("world/return_target", "return_target"):
             self.rr.log(entity, self.rr.Clear(recursive=True))
         self.rr.log("world/lotis_chunks", self.rr.Clear(recursive=True))
+        self.rr.log("world/lotis_encoded_frames", self.rr.Clear(recursive=True))
 
     def clear_route_overlay(self):
         """Remove LoTIS's projected route from the live camera view."""
