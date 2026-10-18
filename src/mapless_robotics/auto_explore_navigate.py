@@ -27,7 +27,7 @@ from .exploration.goal_query import MODEL as QUERY_MODEL, translate_goal
 from .exploration.object_search import (
     DEFAULT_MODEL, ObjectSearch, ObjectSearchWorker, OWLv2Detector, approach_position,
 )
-from .exploration.route_memory import RecordedRoute
+from .exploration.route_memory import RecordedRoute, camera_forward
 from .exploration.view_scan import ViewScan, choose_start
 from .explore_navigate import (
     ENTER, QUIT, DriveOutcome, changed_enough, configure_view, drive, encode_retrieval,
@@ -36,7 +36,7 @@ from .explore_navigate import (
 from .navigate.depth_navigation import DepthNavigation
 from .navigate.odometry import OdometryAgent
 from .navigate.recovery_behaviour import RecoveryBehaviour, should_recover
-from .navigate.lotis_route_policy import LoTISRoutePolicy, compact_route_ids
+from .navigate.lotis_route_policy import LoTISRoutePolicy, chunk_route_ids, compact_route_ids
 from .terminal_keyboard import TerminalKeyboard
 from .visualization.keys import action_for_key, key_name
 from .visualization.rerun_view import RerunView
@@ -176,8 +176,9 @@ def retrieve(sim, agent, method, route, graph, graph_output, view, keyboard, arg
     from here with a fresh encoding (and new automatic retries), q quits.
     Returns True on arrival.
     """
-    frames = [route.frames[index] for index in route.active]
-    states = [route.states[index] for index in route.active]
+    route_ids = route.shortest_path(route.active[0], route.active[-1])
+    frames = [route.frames[index] for index in route_ids]
+    states = [route.states[index] for index in route_ids]
     # The follower starts at the true start with fresh odometry, which is
     # where the explorer's odometry frame began (route frame 0).
     agent.teleport(start_state)
@@ -320,7 +321,6 @@ def explore(
     next_control = 0.0
     paused = False
     recovery = None
-    forward_retry = None
     last_pose_id = None
     force_analysis = True
     prepared_goal_id = None
@@ -465,7 +465,7 @@ def explore(
         agent.set_state(state, reset_sensors=False)
 
     def recover(target_pose, reason, turn_around=True):
-        nonlocal recovery, paused, navigator, force_analysis, next_control, forward_retry
+        nonlocal recovery, paused, navigator, force_analysis, next_control
         route.pending_return = True
         if object_search is not None:
             object_search.reset_candidate()
@@ -481,87 +481,98 @@ def explore(
                   f'(recorded frame {target_pose.frame_index})')
 
         def leg(frame_ids, tracking, target_position, target_yaw, turn):
-            """Drive one leg; returns (success, frame LoTIS last localized the robot at)."""
-            endpoint = frame_ids[0] if tracking == 'backward' else frame_ids[-1]
-            if len(frame_ids) < 2:
-                # A one-frame leg: the robot is already at that recorded frame.
-                return True, endpoint
+            """Drive a route as overlapping LoTIS episodes; return its last reached frame."""
             compact_ids = compact_route_ids(frame_ids, route.states)
-            frames = [route.frames[index] for index in compact_ids]
-            print(f'Return reference: {len(frame_ids)} recorded frames, {len(compact_ids)} travel frames')
-            travel_ids = compact_ids[::-1] if tracking == 'backward' else compact_ids
-            initial_yaw = None
-            if turn:
-                origin = route.states[travel_ids[0]].position
-                for index in travel_ids[1:]:
-                    delta = route.states[index].position - origin
-                    if np.linalg.norm(delta[[0, 2]]) >= 0.15:
-                        initial_yaw = float(np.arctan2(-delta[0], -delta[2]))
-                        break
-            encoded_ids = [compact_ids[index] for index in encode_route(
-                method, frames, tracking, positions=[route.states[index].position for index in compact_ids])]
-            goal = frames[0] if tracking == 'backward' else frames[-1]
-            view.log('goal', view.rr.Image(goal).compress(jpeg_quality=90))
-            print(f'LoTIS {tracking} to frame '
-                  f'{frame_ids[0] if tracking == "backward" else frame_ids[-1]}; press q to stop')
-            try:
-                outcome = drive_with_retries(
-                    sim, agent, method, target_position, graph, graph_output, view, keyboard,
-                    args.max_steps, step_velocity, turned, goal_yaw=target_yaw,
-                    turn_around=turn, initial_yaw=initial_yaw,
-                )
-            finally:
-                view.clear_route_overlay()
-            success = bool(outcome)
-            # Close the loop where LoTIS last localized the robot, not at the nominal endpoint.
-            # Every arrival signal implies that frame is near the end (see LoTISRoutePolicy).
-            nearest = getattr(method, 'nearest_frame', None)
-            reached = encoded_ids[nearest] if nearest is not None else endpoint
-            if not success:
-                # Recorded poses of both frames, so live odometry drift does not enter.
-                gap = np.linalg.norm((route.states[reached].position
-                                      - route.states[endpoint].position)[graph.plane_idx])
-                if nearest is None or gap > ARRIVAL_BACKSTOP:
-                    return False, None
-                print(f'LoTIS stopped without arriving; last localized at frame {reached}, '
-                      f'{gap:.2f} m from the end frame is within the backstop, accepting')
+            if len(compact_ids) < 2:
+                return True, compact_ids[0]
+            max_frames = method.localizer.max_seq_len
+            chunks = chunk_route_ids(
+                compact_ids, route.states, max_frames,
+                overlap=args.lotis_chunk_overlap,
+                view_change_degrees=args.lotis_view_change_degrees,
+            )
+            if tracking == 'backward':
+                chunks.reverse()
+            print(f'Return reference: {len(frame_ids)} recorded frames, '
+                  f'{len(compact_ids)} travel frames, {len(chunks)} LoTIS chunks')
+            view.log_route_chunks(chunks, route.states, active_chunk=0)
+            reached = chunks[0][0] if tracking == 'backward' else chunks[0][-1]
+            previous_endpoint = None
+            for chunk_index, chunk_ids in enumerate(chunks):
+                view.log_route_chunks(chunks, route.states, active_chunk=chunk_index)
+                endpoint = chunk_ids[0] if tracking == 'backward' else chunk_ids[-1]
+                chunk_frames = [route.frames[index] for index in chunk_ids]
+                encoded_indices = encode_route(
+                    method, chunk_frames, tracking,
+                    positions=[route.states[index].position for index in chunk_ids])
+                encoded_ids = [chunk_ids[index] for index in encoded_indices]
+                endpoint_position = route.states[endpoint].position
+                is_final_chunk = chunk_index == len(chunks) - 1
+                forward = camera_forward(route.states[endpoint])
+                chunk_goal_yaw = target_yaw if is_final_chunk else float(
+                    np.arctan2(-forward[0], -forward[2]))
+                chunk_initial_yaw = None
+                if chunk_index == 0 and turn:
+                    travel_ids = chunk_ids[::-1] if tracking == 'backward' else chunk_ids
+                    origin = route.states[travel_ids[0]].position
+                    for index in travel_ids[1:]:
+                        delta = route.states[index].position - origin
+                        if np.linalg.norm(delta[[0, 2]]) >= 0.15:
+                            chunk_initial_yaw = float(np.arctan2(-delta[0], -delta[2]))
+                            break
+                elif previous_endpoint is not None:
+                    next_ids = [index for index in chunk_ids
+                                if (index < previous_endpoint if tracking == 'backward'
+                                    else index > previous_endpoint)]
+                    if next_ids:
+                        delta = (route.states[next_ids[0]].position
+                                 - route.states[previous_endpoint].position)
+                        if np.linalg.norm(delta[[0, 2]]) >= 0.05:
+                            chunk_initial_yaw = float(np.arctan2(-delta[0], -delta[2]))
+                goal_frame = chunk_frames[0] if tracking == 'backward' else chunk_frames[-1]
+                view.log('goal', view.rr.Image(goal_frame).compress(jpeg_quality=90))
+                print(f'LoTIS {tracking} chunk {chunk_index + 1}/{len(chunks)} '
+                      f'to frame {endpoint}; press q to stop')
+                try:
+                    outcome = drive_with_retries(
+                        sim, agent, method, endpoint_position, graph, graph_output, view, keyboard,
+                        args.max_steps, step_velocity, turned, goal_yaw=chunk_goal_yaw,
+                        turn_around=turn if chunk_index == 0 else False,
+                        initial_yaw=chunk_initial_yaw,
+                    )
+                finally:
+                    view.clear_route_overlay()
+                nearest = getattr(method, 'nearest_frame', None)
+                reached = encoded_ids[nearest] if nearest is not None else endpoint
+                if not outcome:
+                    gap = np.linalg.norm((route.states[reached].position
+                                          - route.states[endpoint].position)[graph.plane_idx])
+                    if nearest is None or gap > ARRIVAL_BACKSTOP:
+                        return False, None
+                    print(f'LoTIS stopped without arriving; last localized at frame {reached}, '
+                          f'{gap:.2f} m from the chunk end, accepting this handoff')
+                previous_endpoint = endpoint
             return True, reached
 
         def pose_at(frame_index):
             return next((pose for pose in graph.poses.values()
                          if pose.frame_index == frame_index), None)
 
-        # The return only matters for the route tree when the robot already stands at the
-        # viewpoint (e.g. a goal rejected right next to it): close the loop, skip driving.
+        # Skip driving when the current robot position is already at the target viewpoint.
         distance = np.linalg.norm((agent.get_state().position
                                    - target_pose.pose[:3, 3])[graph.plane_idx])
         if distance <= SKIP_RETURN_RADIUS:
             print(f'Already {distance:.2f} m from P{target_pose.id}; closing the loop at '
                   f'frame {target_pose.frame_index} without driving')
-            success, reached, forward, retry_forward = True, target_pose.frame_index, [], False
+            success, reached = True, target_pose.frame_index
         else:
-            common, forward = route.connection(target_pose.frame_index)
-            common_pose = pose_at(common)
-            backward = route.active[route.active.index(common):]
-            view.log_return_legs([route.states[index].position for index in backward],
-                                 [route.states[index].position for index in forward], common)
-            retry_forward = forward_retry == target_pose.frame_index
-            if retry_forward:
-                success, reached = True, route.active[-1]
-            else:
-                success, reached = leg(
-                    backward, 'backward', route.states[common].position,
-                    yaw(common_pose.pose) if common_pose is not None else None, turn_around)
-        if success:
-            if not retry_forward:
-                restore_view(reached)
-            if len(forward) > 1:
-                # Keep a valid route to where the backward leg ended if the forward leg is stopped.
-                route.close_loop(reached, reason)
-                graph.prune_after_return(route.active, pose_at(reached))
-                success, reached = leg(forward, 'forward', target_pose.pose[:3, 3],
-                                       yaw(target_pose.pose), False)
-                forward_retry = None if success else target_pose.frame_index
+            path = route.shortest_path(route.active[-1], target_pose.frame_index)
+            if not path:
+                raise RuntimeError(f'No recorded route to frame {target_pose.frame_index}')
+            positions = [route.states[index].position for index in path]
+            view.log_return_legs(positions[:1], positions, path[0])
+            success, reached = leg(
+                path, 'forward', target_pose.pose[:3, 3], yaw(target_pose.pose), turn_around)
         if not success:
             recovery = (target_pose, reason)
             paused = True
@@ -581,7 +592,6 @@ def explore(
         restore_view(reached)
         # navigator = _make_navigator(goal_tolerance=graph.visited_distance)
         recovery = None
-        forward_retry = None
         paused = False
         view.set_paused(paused)
         next_control = 0.0
@@ -882,6 +892,14 @@ def main():
         parser.error('--max-steps and --integration-time must be positive')
     if not np.isfinite(args.odometry_noise) or args.odometry_noise < 0:
         parser.error('--odometry-noise must be finite and non-negative')
+    if not np.isfinite(args.route_connect_distance) or args.route_connect_distance <= 0:
+        parser.error('--route-connect-distance must be finite and positive')
+    if not np.isfinite(args.route_heading_weight) or args.route_heading_weight < 0:
+        parser.error('--route-heading-weight must be finite and non-negative')
+    if args.lotis_chunk_overlap < 0:
+        parser.error('--lotis-chunk-overlap must be non-negative')
+    if not np.isfinite(args.lotis_view_change_degrees) or not 0 < args.lotis_view_change_degrees <= 180:
+        parser.error('--lotis-view-change-degrees must be in (0, 180]')
     try:
         scene = resolve_scene(args.scene, args.index, args.scenes_dir)
         graph = ExplorationGraph(args.merge_distance, auto_select_objective=False)
@@ -906,7 +924,7 @@ def main():
             parser.error('--object-stand-off must be finite and positive')
     args.run_dir = args.run_dir or Path('runs/auto_explore_navigate') / datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')
     graph_output = args.graph_output or args.run_dir / 'graph.json'
-    route = RecordedRoute()
+    route = RecordedRoute(args.route_connect_distance, args.route_heading_weight)
     sim = worker = object_worker = method = view = None
     try:
         # Load Habitat before importing LoTIS/Triton (LLVM initialization order).

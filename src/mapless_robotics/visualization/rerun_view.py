@@ -577,12 +577,52 @@ class RerunView:
                         labels=[f"junction frame {junction_frame}"], show_labels=True),
         )
 
+    def log_route_chunks(self, chunks, states, *, active_chunk=None):
+        """Draw LoTIS route chunks and their handoff frames in the world view."""
+        if self.paused:
+            return
+        rr = self.rr
+        palette = ((70, 190, 255), (90, 220, 130), (255, 170, 65),
+                   (210, 120, 255), (70, 220, 210), (255, 110, 140))
+        rr.log("world/lotis_chunks", rr.Clear(recursive=True))
+        boundaries = []
+        boundary_labels = []
+        for index, frame_ids in enumerate(chunks):
+            if not frame_ids:
+                continue
+            points = on_overlay(
+                np.asarray([states[frame_id].position for frame_id in frame_ids]),
+                self.vertical_index, self.overlay_height + 0.08,
+            )
+            color = (255, 230, 55) if index == active_chunk else palette[index % len(palette)]
+            entity = f"world/lotis_chunks/chunk_{index:03d}"
+            if len(points) >= 2:
+                rr.log(entity, rr.LineStrips3D([points], colors=[color], radii=0.025))
+            else:
+                rr.log(entity, rr.Points3D(points, colors=[color], radii=0.035))
+            rr.log(f"{entity}/frames", rr.Points3D(points, colors=[color], radii=0.025))
+            if index < len(chunks) - 1 and chunks[index + 1]:
+                boundary = on_overlay(
+                    np.asarray(states[frame_ids[-1]].position).reshape(1, 3),
+                    self.vertical_index, self.overlay_height + 0.13,
+                )[0]
+                boundaries.append(boundary)
+                boundary_labels.append(
+                    f"LoTIS handoff {index + 1}->{index + 2} | frame {frame_ids[-1]}"
+                )
+        if boundaries:
+            rr.log("world/lotis_chunks/handoffs", rr.Points3D(
+                boundaries, colors=[(255, 70, 220)], radii=0.06,
+                labels=boundary_labels, show_labels=True,
+            ))
+
     def clear_return_target(self):
         """Remove the previous return markers and reference image."""
         if self.paused:
             return
         for entity in ("world/return_target", "return_target"):
             self.rr.log(entity, self.rr.Clear(recursive=True))
+        self.rr.log("world/lotis_chunks", self.rr.Clear(recursive=True))
 
     def clear_route_overlay(self):
         """Remove LoTIS's projected route from the live camera view."""

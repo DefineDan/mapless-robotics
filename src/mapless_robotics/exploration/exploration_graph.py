@@ -97,7 +97,7 @@ class ExplorationGraph:
         max_vectical_vec=0.65,
         upward_pose="y",
         fusion_angle_degrees=30.0,
-        visited_distance=1.0,
+        visited_distance=0.2,
         u_gain_reduction_percentage=1.0,
         u_gain_threshold=0.1,
         enable_occupancy=True,

@@ -81,6 +81,14 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dinov3-weights", type=Path, help="DINOv3 ViT-B/16 checkpoint")
     parser.add_argument("--run-dir", type=Path, help="Directory for frames and graph")
     parser.add_argument("--max-steps", type=int, default=1000, help="Navigation step limit")
+    parser.add_argument("--route-connect-distance", type=float, default=0.05,
+                        help="Maximum 3D pose distance for adding route graph links (metres)")
+    parser.add_argument("--route-heading-weight", type=float, default=0.5,
+                        help="Camera-view smoothness weight in route edge cost (metres/radian^2)")
+    parser.add_argument("--lotis-chunk-overlap", type=int, default=2,
+                        help="Reference frames shared at LoTIS chunk handoffs (default: 2)")
+    parser.add_argument("--lotis-view-change-degrees", type=float, default=75.0,
+                        help="Start a new LoTIS chunk after this camera turn (default: 75)")
     return parser
 
 

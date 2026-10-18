@@ -85,6 +85,14 @@ def main(argv=None):
                  'max_odometry_speed', 'retrieval_start_tolerance', 'integration_time', 'interval']:
         if not np.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             parser.error(name.replace('_', '-')+' must be finite and positive')
+    if not np.isfinite(args.route_connect_distance) or args.route_connect_distance <= 0:
+        parser.error('--route-connect-distance must be finite and positive')
+    if not np.isfinite(args.route_heading_weight) or args.route_heading_weight < 0:
+        parser.error('--route-heading-weight must be finite and non-negative')
+    if args.lotis_chunk_overlap < 0:
+        parser.error('--lotis-chunk-overlap must be non-negative')
+    if not np.isfinite(args.lotis_view_change_degrees) or not 0 < args.lotis_view_change_degrees <= 180:
+        parser.error('--lotis-view-change-degrees must be in (0, 180]')
     if args.lotis_speed is not None and (not np.isfinite(args.lotis_speed) or args.lotis_speed <= 0):
         parser.error('--lotis-speed must be finite and positive')
     if args.max_steps <= 0 or args.lotis_cpu_threads <= 0:
@@ -103,7 +111,7 @@ def main(argv=None):
     args.run_dir.mkdir(parents=True, exist_ok=True)
     args.stream_dir.mkdir(parents=True, exist_ok=True)
     graph_output = args.graph_output or args.run_dir/'graph.json'
-    route = RecordedRoute()
+    route = RecordedRoute(args.route_connect_distance, args.route_heading_weight)
     runtime = worker = object_worker = method = graph = None
     input_failed = False
     print('FULL HANDHELD PIPELINE: scan -> frontier exploration -> LoTIS recovery -> object confirmation -> retrieval', flush=True)

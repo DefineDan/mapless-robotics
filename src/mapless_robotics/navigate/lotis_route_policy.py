@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..exploration.route_memory import camera_forward
+
 
 @dataclass(frozen=True)
 class VelocityCommand:
@@ -308,14 +310,52 @@ class LoTISRoutePolicy:
         return VelocityCommand(0., 0. if self.navigation_failed else self.last_turn)
 
 
-def compact_route_ids(frame_ids, states, spacing=0.15):
-    """Keep translational reference poses and both endpoints, in original order."""
+def compact_route_ids(frame_ids, states, spacing=0.15, view_angle_degrees=12.0):
+    """Keep route progress and meaningful camera turns, including both endpoints."""
     if len(frame_ids) <= 2:
         return list(frame_ids)
     retained = [frame_ids[0]]
     for index in frame_ids[1:-1]:
-        distance = np.linalg.norm((states[index].position - states[retained[-1]].position)[[0, 2]])
-        if distance >= spacing:
+        previous = retained[-1]
+        distance = np.linalg.norm(states[index].position - states[previous].position)
+        cosine = np.clip(np.dot(camera_forward(states[index]), camera_forward(states[previous])), -1.0, 1.0)
+        view_angle = np.rad2deg(np.arccos(cosine))
+        if distance >= spacing or view_angle >= view_angle_degrees:
             retained.append(index)
     retained.append(frame_ids[-1])
     return retained
+
+
+def chunk_route_ids(frame_ids, states, max_frames, overlap=2, view_change_degrees=75.0):
+    """Split an ordered route into overlapping LoTIS chunks at large view changes."""
+    if max_frames < 2:
+        raise ValueError('max_frames must be at least 2')
+    if overlap < 0 or overlap >= max_frames:
+        raise ValueError('overlap must be non-negative and smaller than max_frames')
+    if not np.isfinite(view_change_degrees) or not 0 < view_change_degrees <= 180:
+        raise ValueError('view_change_degrees must be in (0, 180]')
+    if len(frame_ids) <= max_frames:
+        return [list(frame_ids)] if frame_ids else []
+
+    overlap = min(overlap, max_frames - 1)
+    chunks = []
+    start = 0
+    while start < len(frame_ids) - 1:
+        hard_end = min(start + max_frames - 1, len(frame_ids) - 1)
+        end = hard_end
+        sharp_view_boundary = False
+        for candidate in range(start + 2, hard_end + 1):
+            previous_view = camera_forward(states[frame_ids[candidate - 1]])
+            current_view = camera_forward(states[frame_ids[candidate]])
+            cosine = np.clip(np.dot(previous_view, current_view), -1.0, 1.0)
+            angle = np.rad2deg(np.arccos(cosine))
+            if angle >= view_change_degrees:
+                end = candidate - 1
+                sharp_view_boundary = True
+                break
+        chunks.append(list(frame_ids[start:end + 1]))
+        if end == len(frame_ids) - 1:
+            break
+        next_start = end + 1 if sharp_view_boundary else max(start + 1, end - overlap + 1)
+        start = next_start
+    return chunks
