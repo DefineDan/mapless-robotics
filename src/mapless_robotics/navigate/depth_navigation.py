@@ -41,6 +41,12 @@ class DepthNavigation:
         vertical_axis="y",
         camera_intrinsics=None,
         planner=None,
+        max_map_cells=4_000_000,
+        floor_height=None,
+        minimum_obstacle_height=None,
+        maximum_obstacle_height=None,
+        floor_clearance=0.05,
+        require_goal_heading=True,
     ):
         if history_size < 1:
             raise ValueError("history_size must be positive")
@@ -61,6 +67,18 @@ class DepthNavigation:
         if (not np.isfinite(min_voxel_points) or min_voxel_points < 1
                 or int(min_voxel_points) != min_voxel_points):
             raise ValueError("min_voxel_points must be a positive integer")
+        if not isinstance(max_map_cells, int) or max_map_cells <= 0:
+            raise ValueError("max_map_cells must be a positive integer")
+        from ..floor_reference import validate_height_band
+        validate_height_band(floor_height, minimum_obstacle_height, maximum_obstacle_height)
+        if not np.isfinite(floor_clearance) or floor_clearance < 0:
+            raise ValueError('Floor clearance must be finite and nonnegative')
+        self.floor_clearance = float(floor_clearance)
+        self.height_diagnostics = {}
+        self.floor_height = floor_height
+        self.minimum_obstacle_height = minimum_obstacle_height
+        self.maximum_obstacle_height = maximum_obstacle_height
+        self.max_map_cells = max_map_cells
         self.history_size = int(history_size)
         self.positive_delta = float(positive_delta)
         self.negative_delta = float(negative_delta)
@@ -75,6 +93,7 @@ class DepthNavigation:
         self.max_angular_speed = float(max_angular_speed)
         self.goal_tolerance = float(goal_tolerance)
         self.heading_tolerance = float(heading_tolerance)
+        self.require_goal_heading = bool(require_goal_heading)
         self.angular_smoothing = float(angular_smoothing)
         self._last_angular_velocity = 0.0
         self.vertical_index = {"x": 0, "y": 1, "z": 2}[vertical_axis]
@@ -83,12 +102,13 @@ class DepthNavigation:
         self.planner = planner or AStarPlanner(
             self.resolution,
             self.plane_indices,
-            inflation_radius=0.2,
+            inflation_radius=0.15,
             unknown_cost=self.unknown_cost,
         )
         self.trajectory = np.zeros((0, 2), dtype=float)
         self._trajectory_index = 0
         self._frames = deque(maxlen=self.history_size)
+        self._point_frames = deque(maxlen=self.history_size)
         self._free_frames = deque(maxlen=self.history_size)
         self.goal = None
         self.angle_objective = None
@@ -164,21 +184,44 @@ class DepthNavigation:
                                  -(rows - cy) * z / fy,
                                  -z))
         world = local @ pose[:3, :3].T + pose[:3, 3]
-        height_delta = world[:, self.vertical_index] - pose[self.vertical_index, 3]
-        within_height = ((height_delta <= self.positive_delta)
-                         & (height_delta >= -self.negative_delta))
-        world = world[within_height]
+        if self.floor_height is not None:
+            heights = world[:, self.vertical_index]-self.floor_height
+            ground = np.abs(heights) <= self.floor_clearance
+            minimum = max(self.floor_clearance, self.minimum_obstacle_height
+                          if self.minimum_obstacle_height is not None else self.floor_clearance)
+            obstacle = heights > minimum
+            if self.maximum_obstacle_height is not None:
+                obstacle &= heights <= self.maximum_obstacle_height
+            elif self.minimum_obstacle_height is None:
+                # Retain the previous ceiling cutoff unless the operator
+                # supplies an explicit floor-relative obstacle band.
+                obstacle &= world[:, self.vertical_index] <= pose[self.vertical_index, 3]+self.positive_delta
+            world = world[ground | obstacle]
+        else:
+            # Without a known floor, preserve the original camera-relative band.
+            height_delta = world[:, self.vertical_index] - pose[self.vertical_index, 3]
+            within_height = ((height_delta <= self.positive_delta)
+                             & (height_delta >= -self.negative_delta))
+            world = world[within_height]
         if len(world) and self.min_voxel_points > 1:
             voxel_indices = np.floor(world / self.voxel_size).astype(np.int64)
             _, inverse, counts = np.unique(
                 voxel_indices, axis=0, return_inverse=True, return_counts=True
             )
             world = world[counts[inverse] >= self.min_voxel_points]
+        # Ground is a depth surface, not a vertical obstruction. Keep its
+        # projected ray and endpoint as free-space evidence. Above-floor
+        # obstacle endpoints remain occupied, with occupied evidence winning.
+        ground_world = np.zeros((0, 3), dtype=float)
+        if self.floor_height is not None:
+            heights = world[:, self.vertical_index]-self.floor_height
+            ground = np.abs(heights) <= self.floor_clearance
+            ground_world, world = world[ground], world[~ground]
+        self.height_diagnostics = dict(
+            floor_height=self.floor_height, floor_clearance=self.floor_clearance,
+            ground_samples=len(ground_world), obstacle_samples=len(world))
         points = world[:, self.plane_indices]
 
-        # A depth ray confirms free space up to (but not including) its surface
-        # endpoint. Many pixels project into the same cell, so deduplicate the
-        # endpoints before tracing them through the planar grid.
         camera_cell = np.floor(
             pose[:3, 3][self.plane_indices] / self.resolution
         ).astype(np.int64)
@@ -189,6 +232,11 @@ class DepthNavigation:
         free_cells = set()
         for endpoint in endpoint_cells:
             free_cells.update(self._ray_cells(camera_cell, endpoint))
+        ground_cells = np.unique(
+            np.floor(ground_world[:, self.plane_indices] / self.resolution).astype(np.int64), axis=0)
+        for endpoint in ground_cells:
+            free_cells.update(self._ray_cells(camera_cell, endpoint))
+            free_cells.add(tuple(map(int, endpoint)))
 
         self.goal = goal
         if angle_objective is not None:
@@ -198,6 +246,7 @@ class DepthNavigation:
         self.angle_objective = angle_objective
         self.camera_pose = pose.copy()
         self._frames.append(points)
+        self._point_frames.append(world.copy())
         self._free_frames.append(free_cells)
         self.occupancy = {}
         for frame in self._frames:
@@ -250,6 +299,9 @@ class DepthNavigation:
         target = self.goal[self.plane_indices]
         goal_distance = float(np.linalg.norm(target - position))
         within_goal_tolerance = goal_distance <= self.goal_tolerance
+        if within_goal_tolerance and not self.require_goal_heading:
+            self._last_angular_velocity = 0.0
+            return 0.0, 0.0
         if not len(self.trajectory) and not within_goal_tolerance:
             return 0.0, self._smooth_angular_velocity(0.0)
 
@@ -309,27 +361,25 @@ class DepthNavigation:
 
     def get_sim_action(self, linear, angular, integration_time=0.1):
         """Return a callable that applies velocities to a Habitat simulator."""
-        import habitat_sim
-
-        from habitat_sim.utils.common import quat_from_magnum, quat_to_magnum
-
-        vel = habitat_sim.physics.VelocityControl()
-        vel.controlling_lin_vel = vel.controlling_ang_vel = True
-        vel.lin_vel_is_local = vel.ang_vel_is_local = True
-        vel.linear_velocity = np.array([0.0, 0.0, -float(linear)])
-        vel.angular_velocity = np.array([0.0, float(angular), 0.0])
-
         def apply(sim):
+            # Physical adapters consume suggestions and wait for measured motion.
+            # They never import Habitat or synthesize a new robot pose.
+            if hasattr(sim, 'apply_velocity'):
+                return sim.apply_velocity(float(linear), float(angular), float(integration_time))
+            import habitat_sim
+            from habitat_sim.utils.common import quat_from_magnum, quat_to_magnum
+            vel = habitat_sim.physics.VelocityControl()
+            vel.controlling_lin_vel = vel.controlling_ang_vel = True
+            vel.lin_vel_is_local = vel.ang_vel_is_local = True
+            vel.linear_velocity = np.array([0.0, 0.0, -float(linear)])
+            vel.angular_velocity = np.array([0.0, float(angular), 0.0])
             agent = sim.get_agent(0)
             state = agent.get_state()
-            previous = habitat_sim.RigidState(
-                quat_to_magnum(state.rotation), state.position
-            )
+            previous = habitat_sim.RigidState(quat_to_magnum(state.rotation), state.position)
             target = vel.integrate_transform(float(integration_time), previous)
             state.position = sim.step_filter(previous.translation, target.translation)
             state.rotation = quat_from_magnum(target.rotation)
             agent.set_state(state, reset_sensors=False)
-
         return apply
 
     def get_map(self):
@@ -366,7 +416,11 @@ class DepthNavigation:
         padding_cells = int(np.ceil(self.map_padding / self.resolution))
         minimum -= padding_cells
         maximum += padding_cells
-        grid = np.full(tuple(maximum - minimum + 1), UNKNOWN, dtype=np.uint8)
+        shape = maximum - minimum + 1
+        if int(shape[0])*int(shape[1]) > self.max_map_cells:
+            raise ValueError(f'Local navigation map would require {tuple(shape)} cells '
+                             f'(limit {self.max_map_cells:,}); check odometry and target coordinates')
+        grid = np.full(tuple(shape), UNKNOWN, dtype=np.uint8)
         if self.free_space:
             free = np.asarray(list(self.free_space), dtype=np.int64) - minimum
             grid[free[:, 0], free[:, 1]] = FREE
@@ -377,21 +431,12 @@ class DepthNavigation:
         return grid, origin
 
     def get_point_cloud(self):
-        """Return recent obstacle points in Habitat world XYZ coordinates.
+        """Return the measured world XYZ of recent retained obstacle samples.
 
-        The planar coordinates are inserted on ``plane_indices`` and the
-        latest camera position supplies the configured vertical coordinate.
-        This maps the navigation frame's vertical axis onto Habitat's world
-        axes (Y is up for the default configuration).
+        Planar occupancy uses ``_frames``. Keep this separate 3D history so the
+        display cannot turn floor, door and wall samples into a horizontal
+        sheet at the latest camera height.
         """
-        if self.camera_pose is None or not self._frames:
+        if not self._point_frames:
             return np.zeros((0, 3), dtype=float)
-        points = np.concatenate(tuple(self._frames), axis=0)
-        if not len(points):
-            return np.zeros((0, 3), dtype=float)
-        world_points = np.zeros((len(points), 3), dtype=float)
-        world_points[:, self.plane_indices] = points
-        world_points[:, self.vertical_index] = self.camera_pose[
-            self.vertical_index, 3
-        ]
-        return world_points
+        return np.concatenate(tuple(self._point_frames), axis=0).copy()
