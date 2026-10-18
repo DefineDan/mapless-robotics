@@ -112,6 +112,7 @@ class ExplorationGraph:
         minimum_frontier_height=None,
         maximum_frontier_height=None,
         require_arrival_heading=True,
+        compare_frontiers_2d=True,
     ):
         if not np.isfinite(merge_distance) or merge_distance < 0:
             raise ValueError("merge_distance must be finite and nonnegative")
@@ -140,6 +141,12 @@ class ExplorationGraph:
         self.idx_upward = axis_indices[upward_pose]
         self.plane_idx = np.ones(3, dtype=bool)
         self.plane_idx[self.idx_upward] = False
+        # Retired-frontier suppression can compare in the ground plane or in
+        # full xyz. Keep the existing 3D behavior unless explicitly enabled.
+        self.comp_axis_front = (
+            np.array([0, 1, 2])[self.plane_idx]
+            if compare_frontiers_2d else np.array([0, 1, 2])
+        )
         self.max_vectical_vec = (
             None if max_vectical_vec is None else float(max_vectical_vec)
         )
@@ -482,7 +489,8 @@ class ExplorationGraph:
         position = np.asarray(frontier.pos3d, dtype=float)
         if position.shape != (3,) or not np.isfinite(position).all():
             raise ValueError("Frontier position must be a finite xyz vector")
-        if any(np.linalg.norm(position - np.asarray(item['frontier']['position']))
+        if any(np.linalg.norm((position - np.asarray(item['frontier']['position']))
+                              [self.comp_axis_front])
                <= max(self.merge_distance, self.visited_distance)
                for item in self.retired_frontiers):
             return None
@@ -778,10 +786,12 @@ class ExplorationGraph:
         matches = [frontier for frontier in result.frontiers
                    if np.shape(frontier.pos3d) == (3,)
                    and np.isfinite(frontier.pos3d).all()
-                   and np.linalg.norm(np.asarray(frontier.pos3d) - objective.position)
+                   and np.linalg.norm((np.asarray(frontier.pos3d) - objective.position)
+                                      [self.comp_axis_front])
                    <= max(self.merge_distance, self.visited_distance)]
         match = min(matches, key=lambda frontier: np.linalg.norm(
-            np.asarray(frontier.pos3d) - objective.position), default=None)
+            (np.asarray(frontier.pos3d) - objective.position)[self.comp_axis_front]),
+            default=None)
         gain = getattr(match, 'gain', None)
         if match is None:
             status, count = 'not_observed', 0
@@ -847,6 +857,7 @@ class ExplorationGraph:
                 "camera_intrinsics": _json_value(self.camera_intrinsics),
                 "val_depth_width": self.val_depth_width,
                 "depth_validity_threshold": self.depth_validity_threshold,
+                "compare_frontiers_2d": len(self.comp_axis_front) == 2,
             },
             "poses": [_json_value(asdict(node)) for node in self.poses.values()],
             "frontiers": [
