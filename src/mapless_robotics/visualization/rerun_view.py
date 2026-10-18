@@ -59,6 +59,7 @@ class RerunView:
         self.enable_edge_vis = enable_edge_vis
         # Habitat is Y-up; updated from the graph in log_analysis.
         self.vertical_index = 1
+        self.overlay_height = OVERLAY_HEIGHT
         self.enable_depth_vis = enable_depth_vis
         self.enable_navigation_points_vis = enable_navigation_points_vis
         # Simulator robot trail, drawn once it diverges from odometry (the graph shows odometry).
@@ -156,7 +157,7 @@ class RerunView:
                         channel_datatype="U8",
                     ),
                     cell_size=graph.ena_map.resolution,
-                    translation=[map_x, 0.0, map_z],
+                    translation=[map_x, getattr(graph, 'floor_height', None) or 0., map_z],
                     rotation_axis_angle=rr.components.RotationAxisAngle(
                         [1.0, 0.0, 0.0], np.pi / 2
                     ),
@@ -273,8 +274,10 @@ class RerunView:
             if len(points):
                 self.rr.log(
                     "world/depth_navigation_points",
-                    self.rr.Points3D(points, colors=[(255, 180, 40)], radii=0.025),
+                    self.rr.Points3D(points, colors=[(255, 180, 40)], radii=0.012),
                 )
+            else:
+                self.rr.log("world/depth_navigation_points", self.rr.Clear(recursive=True))
         for entity in ("world/depth_navigation_trajectory", "world/depth_navigation_waypoints"):
             rr.log(entity, rr.Clear(recursive=True))
         trajectory = np.asarray(getattr(navigator, "trajectory", ()), dtype=float)
@@ -283,7 +286,7 @@ class RerunView:
             path_points[:, navigator.plane_indices] = trajectory
             if navigator.camera_pose is not None:
                 # path_points[:, navigator.vertical_index] = navigator.camera_pose[navigator.vertical_index, 3]
-                path_points[:, navigator.vertical_index] = OVERLAY_HEIGHT
+                path_points[:, navigator.vertical_index] = (getattr(navigator, 'floor_height', None) or 0.) + OVERLAY_HEIGHT
             rr.log(
                 "world/depth_navigation_trajectory",
                 rr.LineStrips3D([path_points], colors=[(40, 220, 255)]),
@@ -313,6 +316,7 @@ class RerunView:
         # makes row zero the high end of axis 1, but leaves the lower edge at
         # the map origin.
         translation[plane[1]] = origin[1]
+        translation[navigator.vertical_index] = getattr(navigator, 'floor_height', None) or 0.
         # The raster axes follow the configured planar axes. For the default
         # X/Z ground plane, rotating the image plane around X places it on the
         # Habitat floor, matching the exploration map visualization.
@@ -391,18 +395,19 @@ class RerunView:
                 labels=[f"F{item['frontier']['id']} {item['reason']}" for item in history],
             ))
         self.vertical_index = graph.idx_upward
+        self.overlay_height = (getattr(graph, 'floor_height', None) or 0.) + OVERLAY_HEIGHT
         excluded = getattr(graph, "excluded_pose_ids", set())
         visible_poses = [node for node in graph.poses.values() if node.id not in excluded]
         excluded_edges = [
             on_overlay([graph.poses[node.parent_id].pose[:3, 3], node.pose[:3, 3]],
-                       self.vertical_index)
+                       self.vertical_index, self.overlay_height)
             for node in graph.poses.values()
             if node.id in excluded and node.parent_id in graph.poses
         ]
         if excluded_edges:
             rr.log("world/excluded_branches", rr.LineStrips3D(
                 excluded_edges, colors=[(180, 65, 65)]))
-        poses = {node.id: on_overlay(np.asarray(node.pose)[:3, 3], self.vertical_index) for node in visible_poses}
+        poses = {node.id: on_overlay(np.asarray(node.pose)[:3, 3], self.vertical_index, self.overlay_height) for node in visible_poses}
         if poses:
             rr.log(
                 "world/poses",
@@ -507,7 +512,7 @@ class RerunView:
             return
         rr = self.rr
         self.clear_return_target()
-        viewpoint = on_overlay(np.asarray(pose.pose)[:3, 3], self.vertical_index)
+        viewpoint = on_overlay(np.asarray(pose.pose)[:3, 3], self.vertical_index, self.overlay_height)
         gain_label = f" | peak gain {score:.3f}" if score is not None else ""
         rr.log(
             "world/return_target/frontier",
@@ -556,9 +561,9 @@ class RerunView:
             return
         rr = self.rr
         backward = on_overlay(np.asarray(backward, dtype=float).reshape(-1, 3),
-                              self.vertical_index, OVERLAY_HEIGHT + 0.04)
+                              self.vertical_index, self.overlay_height + 0.04)
         forward = on_overlay(np.asarray(forward, dtype=float).reshape(-1, 3),
-                             self.vertical_index, OVERLAY_HEIGHT + 0.04)
+                             self.vertical_index, self.overlay_height + 0.04)
         for entity, points, color in (("world/return_target/backward_leg", backward, (255, 140, 30)),
                                       ("world/return_target/forward_leg", forward, (60, 200, 90))):
             if len(points) >= 2:

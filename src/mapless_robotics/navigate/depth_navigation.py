@@ -176,14 +176,31 @@ class DepthNavigation:
         stride = max(1, int(max(height, width) / 100))
         rows, cols = np.mgrid[0:height:stride, 0:width:stride]
         z = depth[::stride, ::stride]
-        valid = np.isfinite(z) & (z > 0) & (z <= self.max_depth)
-        rows, cols, z = rows[valid], cols[valid], z[valid]
+        # Keep visibility evidence separate from obstacle filtering below:
+        # height gating and voxel denoising should not erase rays that the
+        # camera actually observed. Returns beyond max_depth still establish
+        # free space up to the configured range, but are not obstacle points.
+        observed = np.isfinite(z) & (z > 0)
+        rows, cols, z = rows[observed], cols[observed], z[observed]
         fx, fy = intrinsics[0, 0], intrinsics[1, 1]
         cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+        ray_depth = np.minimum(z, self.max_depth)
+        ray_local = np.column_stack(((cols - cx) * ray_depth / fx,
+                                     -(rows - cy) * ray_depth / fy,
+                                     -ray_depth))
+        ray_world = ray_local @ pose[:3, :3].T + pose[:3, 3]
         local = np.column_stack(((cols - cx) * z / fx,
                                  -(rows - cy) * z / fy,
                                  -z))
         world = local @ pose[:3, :3].T + pose[:3, 3]
+        if self.floor_height is not None:
+            # Returns below the known floor cannot establish valid free space.
+            above_floor = world[:, self.vertical_index] >= self.floor_height - self.floor_clearance
+            world, ray_world, z = world[above_floor], ray_world[above_floor], z[above_floor]
+        # Apply the depth mask while world and z still describe the same samples.
+        # Visibility rays retain all observed returns independently of obstacles.
+        world = world[z <= self.max_depth]
+
         if self.floor_height is not None:
             heights = world[:, self.vertical_index]-self.floor_height
             ground = np.abs(heights) <= self.floor_clearance
@@ -203,6 +220,7 @@ class DepthNavigation:
             within_height = ((height_delta <= self.positive_delta)
                              & (height_delta >= -self.negative_delta))
             world = world[within_height]
+
         if len(world) and self.min_voxel_points > 1:
             voxel_indices = np.floor(world / self.voxel_size).astype(np.int64)
             _, inverse, counts = np.unique(
@@ -226,17 +244,28 @@ class DepthNavigation:
             pose[:3, 3][self.plane_indices] / self.resolution
         ).astype(np.int64)
         endpoint_cells = np.unique(
-            np.floor(world[:, self.plane_indices] / self.resolution).astype(np.int64),
+            np.floor(ray_world[:, self.plane_indices] / self.resolution).astype(np.int64),
             axis=0,
         )
         free_cells = set()
         for endpoint in endpoint_cells:
             free_cells.update(self._ray_cells(camera_cell, endpoint))
+
         ground_cells = np.unique(
             np.floor(ground_world[:, self.plane_indices] / self.resolution).astype(np.int64), axis=0)
         for endpoint in ground_cells:
             free_cells.update(self._ray_cells(camera_cell, endpoint))
             free_cells.add(tuple(map(int, endpoint)))
+
+        # A return beyond the planning range says the ray stayed clear through
+        # the range boundary, so that boundary cell is observed free as well.
+        far_ray_endpoints = np.unique(
+            np.floor(ray_world[z > self.max_depth][:, self.plane_indices]
+                     / self.resolution).astype(np.int64),
+            axis=0,
+        ) if np.any(z > self.max_depth) else np.empty((0, 2), dtype=np.int64)
+        for endpoint in far_ray_endpoints:
+            free_cells.add((int(endpoint[0]), int(endpoint[1])))
 
         self.goal = goal
         if angle_objective is not None:

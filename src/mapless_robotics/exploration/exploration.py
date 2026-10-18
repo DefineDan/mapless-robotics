@@ -36,11 +36,12 @@ class Observation:
     # camera_pose are what the robot believes (odometry, see OdometryAgent).
     gt_robot_pose: np.ndarray | None = None
     gt_camera_pose: np.ndarray | None = None
+    intrinsics: np.ndarray | None = None
 
     def __post_init__(self):
         # Copy before processing: movement and reused camera buffers cannot
         # change data while the worker is processing it.
-        for name in ("rgb", "robot_pose", "camera_pose", "depth", "gt_robot_pose", "gt_camera_pose"):
+        for name in ("rgb", "robot_pose", "camera_pose", "depth", "gt_robot_pose", "gt_camera_pose", "intrinsics"):
             value = getattr(self, name)
             if value is not None:
                 value = (
@@ -50,6 +51,10 @@ class Observation:
                 object.__setattr__(self, name, value)
         if self.rgb.ndim != 3 or self.rgb.shape[2] != 3:
             raise ValueError("Expected an HxWx3 RGB image")
+        if self.intrinsics is not None and (self.intrinsics.shape != (3, 3)
+                or not np.isfinite(self.intrinsics).all()
+                or min(self.intrinsics[0, 0], self.intrinsics[1, 1]) <= 0):
+            raise ValueError('Invalid captured camera intrinsics')
         if not np.isfinite(self.timestamp):
             raise ValueError("Capture timestamp must be finite")
 
@@ -63,12 +68,18 @@ class AnalysisResult:
     frontier_analysis: bool = True
     object_detections: tuple = ()
     object_analysis: bool = False
+    frontier_diagnostics: dict | None = None
 
 
 class ExplorationPipeline:
-    def __init__(self, frontier_extractor, depth_estimator=None):
+    def __init__(self, frontier_extractor, depth_estimator=None, *, mask_invalid_columns=True,
+                 invalid_depth_dilation=20):
         self.frontier_extractor = frontier_extractor
         self.depth_estimator = depth_estimator
+        self.mask_invalid_columns = mask_invalid_columns
+        if not isinstance(invalid_depth_dilation, int) or invalid_depth_dilation < 0:
+            raise ValueError('Invalid-depth dilation must be a nonnegative integer')
+        self.invalid_depth_dilation = invalid_depth_dilation
 
     def estimate_depth(self, observation):
         depth = (
@@ -94,12 +105,18 @@ class ExplorationPipeline:
         # frontiers anchored in observed pixels only; estimated depth has no
         # corresponding ground-truth coverage mask.
         if observation.depth is not None:
-            invalid = (observation.depth == 0).astype(np.uint8)
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
-            invalid = cv2.dilate(invalid, kernel)
+            invalid = (~np.isfinite(observation.depth) | (observation.depth <= 0)).astype(np.uint8)
+            # HM3D's missing patches use a conservative margin. Stereo cameras
+            # have scattered holes at real edges; live mode validates the anchor
+            # pixel without expanding those holes into neighboring valid depth.
+            if self.invalid_depth_dilation:
+                kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (self.invalid_depth_dilation, self.invalid_depth_dilation))
+                invalid = cv2.dilate(invalid, kernel)
             mask = (invalid == 0).astype(np.uint8)
             # If any pixel in a column is invalid, exclude the whole column.
-            mask[:, np.any(mask == 0, axis=0)] = 0
+            if self.mask_invalid_columns:
+                mask[:, np.any(mask == 0, axis=0)] = 0
         else:
             mask = None
         result = self.frontier_extractor(
@@ -117,7 +134,8 @@ class ExplorationPipeline:
         # Own the result before another inference can mutate detector buffers.
         marked = np.array(marked, dtype=np.uint8, copy=True)
         marked.setflags(write=False)
-        return AnalysisResult(observation, frontiers, marked, depth)
+        return AnalysisResult(observation, frontiers, marked, depth,
+                              frontier_diagnostics=dict(getattr(self.frontier_extractor, "last_diagnostics", {})))
 
 
 class AnalysisTrigger:

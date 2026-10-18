@@ -151,6 +151,8 @@ def capture(sim, agent):
     Poses come from ``agent.get_state()``: odometry for an OdometryAgent, else
     ground truth. The ground-truth poses are always kept in the gt_* fields.
     """
+    if hasattr(sim, 'capture_observation'):
+        return sim.capture_observation()
     from habitat_sim.utils.common import quat_to_magnum
 
     pixels = sim.get_sensor_observations()

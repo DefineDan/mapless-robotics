@@ -908,3 +908,32 @@ Focused checks, without a camera or downloads:
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -p 'test_handheld*.py' -v
 ```
+
+## Scenes to test:
+
+- data/hm3d-train-habitat-v0.2/00352-zmZvNTCxMZE/zmZvNTCxMZE.basis.glb
+- data/hm3d-train-habitat-v0.2/00005-yPKGKBCyYx8/yPKGKBCyYx8.basis.glb
+- data/hm3d-train-habitat-v0.2/00231-4h4JxvG3cip/4h4JxvG3cip.basis.glb
+- data/hm3d-train-habitat-v0.2/00177-VSxVP19Cdyw/VSxVP19Cdyw.basis.glb
+- data/hm3d-train-habitat-v0.2/00548-otTm4oTrHvc/otTm4oTrHvc.basis.glb
+- data/hm3d-train-habitat-v0.2/00715-kjUg7BaQF1C/kjUg7BaQF1C.basis.glb
+- data/hm3d-train-habitat-v0.2/00675-c6TFyURFrL4/c6TFyURFrL4.basis.glb
+- data/hm3d-train-habitat-v0.2/00659-ZVPMj4YoZtK/ZVPMj4YoZtK.basis.glb
+- data/hm3d-train-habitat-v0.2/00080-gPf8XzHACGn/gPf8XzHACGn.basis.glb
+- data/hm3d-train-habitat-v0.2/00559-53jtKd53a1X/53jtKd53a1X.basis.glb
+- data/hm3d-train-habitat-v0.2/00777-N17ddiDvJr9/N17ddiDvJr9.basis.glb
+- data/hm3d-train-habitat-v0.2/00353-8qbZhbTc1wX/8qbZhbTc1wX.basis.glb
+- data/hm3d-train-habitat-v0.2/00609-x1pTUWx9DPr/x1pTUWx9DPr.basis.glb
+- data/hm3d-train-habitat-v0.2/00301-JiHGQpwKUvd/JiHGQpwKUvd.basis.glb
+- data/hm3d-train-habitat-v0.2/00067-osQy15y8EVT/osQy15y8EVT.basis.glb
+
+
+- data/hm3d-train-habitat-v0.2/00700-aosjAwX5Lnq/aosjAwX5Lnq.basis.glb
+- data/hm3d-train-habitat-v0.2/00744-1S7LAXRdDqK/1S7LAXRdDqK.basis.glb
+- data/hm3d-train-habitat-v0.2/00733-GtM3JtRvvvR/GtM3JtRvvvR.basis.glb
+
+
+- data/hm3d-train-habitat-v0.2/00248-PM558qFsyi8/PM558qFsyi8.basis.glb
+- data/hm3d-train-habitat-v0.2/00297-jGdNyKqGZJw/jGdNyKqGZJw.basis.glb
+- data/hm3d-train-habitat-v0.2/00780-3iZkJUc7KhX/3iZkJUc7KhX.basis.glb
+- 00291-Umx6CdjZfvy/Umx6CdjZfvy.basis.glb

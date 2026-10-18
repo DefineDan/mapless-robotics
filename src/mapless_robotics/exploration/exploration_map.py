@@ -11,18 +11,29 @@ class ExplorationMap:
     outside its current bounds.
     """
 
-    def __init__(self, ini_depth=0.1, end_depth=5.0, resolution=0.05):
+    def __init__(self, ini_depth=0.1, end_depth=5.0, resolution=0.05, max_cells=4_000_000):
         if not (np.isfinite(ini_depth) and np.isfinite(end_depth)
                 and 0 <= ini_depth < end_depth):
             raise ValueError("depth limits must satisfy 0 <= ini_depth < end_depth")
         if not np.isfinite(resolution) or resolution <= 0:
             raise ValueError("resolution must be finite and positive")
+        if not isinstance(max_cells, int) or max_cells <= 0:
+            raise ValueError("max_cells must be a positive integer")
+        self.max_cells = max_cells
         self.ini_depth = float(ini_depth)
         self.end_depth = float(end_depth)
         self.resolution = float(resolution)
         self.origin = np.array([-end_depth, -end_depth], dtype=float)
         size = int(np.ceil(2 * end_depth / resolution))
+        self._check_size(size, size)
         self.map = np.zeros((size, size), dtype=np.uint8)
+
+    def _check_size(self, height, width):
+        if int(height)*int(width) > self.max_cells:
+            raise ValueError(
+                f'Exploration map would require {height} x {width} cells '
+                f'(limit {self.max_cells:,}). Check OpenVINS: invalid or diverging '
+                'odometry must be restarted, not mapped or clipped.')
 
     @property
     def grid(self):
@@ -49,6 +60,7 @@ class ExplorationMap:
             old_h, old_w = self.map.shape
             left, bottom = np.maximum(-lo, 0)
             right, top = np.maximum(hi - np.array([old_w-1, old_h-1]), 0)
+            self._check_size(old_h + bottom + top, old_w + left + right)
             new = np.zeros((old_h + bottom + top, old_w + left + right), dtype=np.uint8)
             new[bottom:bottom+old_h, left:left+old_w] = self.map
             self.map = new

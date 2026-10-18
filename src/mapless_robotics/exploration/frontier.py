@@ -151,6 +151,8 @@ class FrontierExtractor:
             extrinsic=extrinsic_camera_pos,
         )
 
+        raw_count = len(ft_list) if ft_list is not None else 0
+        mask_coverage = None
         if ft_list is not None and mask is not None:
             mask = np.asarray(mask)
             if mask.ndim != 2:
@@ -177,6 +179,7 @@ class FrontierExtractor:
                     f"got {mask.shape}"
                 )
 
+            mask_coverage = float(np.mean(mask > 0))
             height, width = mask.shape
             ft_list = [
                 frontier
@@ -187,6 +190,12 @@ class FrontierExtractor:
                 ]
             ]
 
+        self.last_diagnostics = dict(
+            raw_anchors=raw_count, retained_anchors=len(ft_list) if ft_list is not None else 0,
+            frontier_pixels=int(np.count_nonzero(self.detector.ft_region)),
+            valid_depth_fraction=float(np.mean(np.isfinite(depth) & (depth > 0))),
+            mask_valid_fraction=mask_coverage,
+        )
         return [] if ft_list is None else ft_list
 
     def visualize(self, frontiers):
