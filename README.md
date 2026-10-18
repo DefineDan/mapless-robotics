@@ -641,3 +641,240 @@ where wheels turn without the robot moving.
 
 Simulator stepping (`sim.step`, `step_filter` collisions) and plotting
 intentionally stay on ground truth.
+
+## Handheld RealSense + OpenVINS
+
+`--mode explore` runs **the same `auto_explore_navigate.explore` state machine**
+with live inputs and human walking instructions. It includes the initial camera
+scan, frontier selection/revalidation, depth navigation, LoTIS recovery to saved
+viewpoints, route pruning, optional object search/confirmation, and retrieval.
+The simulator entry point remains available. Real-camera poses are read-only:
+there is no simulated integration, teleport, or robot velocity publisher.
+
+Start these in separate terminals from `mapless-robotics/`:
+
+```bash
+./scripts/start_handheld_camera.sh
+./scripts/start_handheld_openvins.sh
+./scripts/start_handheld_bridge.sh
+```
+
+Use the RGB-D camera script: the earlier stereo-only script disables RGB/depth.
+All three scripts default to ROS domain 1. `OPENVINS_WORKSPACE` overrides
+`~/openvins_ws`; the camera uses the previously patched RealSense ROS driver.
+Firmware is unchanged. Keep still initially, then move gently to initialize VIO.
+
+Start the full guided workflow, with Rerun:
+
+```bash
+./scripts/run_handheld.sh --mode explore \
+  --record-dir runs/handheld/office-full-01
+
+# Full object-search workflow, using a concrete OWLv2 label without Qwen translation:
+./scripts/run_handheld.sh --mode explore \
+  --record-dir runs/handheld/chair-search-01 --object-query "chair" --no-qwen
+```
+
+Omit `--no-qwen` to use the same one-time goal translation as the automatic
+launcher. Other object/recovery/scan settings match `auto_explore_navigate`.
+LoTIS/DINOv3 load for recovery and retrieval even before the first return is needed.
+The launcher automatically uses the existing local ViT-B checkpoint when present;
+`DINOV3_WEIGHTS` or `--dinov3-weights` can override it. `--lotis-device cpu` selects CPU.
+Use a fresh output directory each time; old runs are retained.
+
+Rerun shows a camera-centred top-down local map, velocity suggestions, input health,
+pipeline state, the 3D pose/frontier graph, depth/obstacle data, the analyzed frontier
+crop, LoTIS projections/reference views, and optional object detections. The right
+column keeps the local map, a large status/target/distance message, and pipeline
+state visible throughout mapping. The map follows measured position while keeping
+world -Z up and +X right. Blue marks your position/heading, gold the goal, cyan the
+actual local planner path, red obstacles, light cells observed free space, and grey
+unknown space. The blue circle shows the configured horizontal arrival radius.
+Off-screen goals are marked at the map edge with distance. `--map-span 6` controls
+the map's width/height in metres. A changed goal suppresses an old goal's path;
+no straight-line substitute is drawn when no local plan is available. LoTIS recovery
+shows its recorded route in orange, separately labelled from a local collision
+plan. The background is the raw rolling occupancy grid, before planner inflation
+and endpoint clearing; grey/unknown cells can be traversed at an additional cost.
+The map/status heartbeat continues during model loading/inference. Frontier, LoTIS, recovery and object
+panes are tabs beneath the map. The viewer follows the shared `live_time` timeline;
+if you pause playback to inspect history, return to Follow for current guidance.
+Keep the **terminal focused** for keys, as with the simulator's Rerun launcher:
+
+- Space: pause/resume; `f`: analyze; `g`: save.
+- `u`: reject the selected frontier; `o`: dismiss the detected object.
+- `r`: retry a stopped LoTIS recovery; `b`: physically turn around with guidance.
+- Enter: confirm found/end exploration and begin the retrieval workflow.
+- `q`/Escape: stop. Ctrl+C exits and saves.
+
+Handheld frontier arrival is position-only: entering the configured
+`ExplorationGraph.visited_distance` horizontal arrival radius retires that frontier
+without matching its heading.
+The local navigator stops at that radius without a final heading turn. Steering
+toward the frontier, frontier-direction fusion, saved-view alignment and LoTIS
+recovery remain active. The simulator entry point keeps its prior arrival policy.
+
+Add `--skip-view-alignment` to disable the "Align with the recorded view" yaw/tilt
+wait when selecting a saved viewpoint, finishing LoTIS recovery, or starting
+retrieval. It keeps your measured orientation and continues with the current
+camera view. Default behavior still requires alignment. This option does not
+skip intentional scans, explicit turn-around commands, or steering along a path.
+LoTIS may localize less reliably when the current view differs from the recording.
+The setting is saved as `align_recorded_views` in route initialization metadata.
+
+During scans, rotate until the measured camera heading reaches each requested
+view. During recovery, turn/tilt to match the saved viewpoint; the program waits
+for your actual pose rather than overwriting it. For retrieval, physically return
+to the recorded start, keep the estimator running, and press Enter when close
+(within 0.5 m by default). LoTIS then guides you from that start to the found object.
+A new odometry session requires a new run; independent later route following can
+use the archived visual route without sharing its original world origin.
+
+Choose the depth source explicitly for frontier detection, local obstacles and
+object localization:
+
+```bash
+# Aligned metric depth from the D455 (default):
+./scripts/run_handheld.sh --mode explore --scan-views 0 \
+  --depth-source realsense --record-dir runs/handheld/depth-camera-01
+
+# Predicted depth from UniK3D using RGB and the calibrated intrinsics:
+./scripts/run_handheld.sh --mode explore --scan-views 0 \
+  --depth-source estimated --depth-model lpiccinelli/unik3d-vitl \
+  --record-dir runs/handheld/depth-model-01
+```
+
+Keep your floor-height, object-query and other options on either command. The
+source/model is shown in Rerun and stored in `route.json` initialization metadata.
+Estimated mode passes no captured depth to analysis and does not mix in camera
+depth for local-map refreshes. OpenVINS continues using stereo IR + IMU in both
+modes. The ROS bridge still synchronizes RGB and aligned camera depth; this switch
+selects the downstream geometry source, not a different camera launch profile.
+Model weights must be available locally or downloadable. In a CPU check with two
+threads, the cached ViT-L took about 12.5 s to load and 19.4 s for one 640x480 frame;
+live latency depends on hardware and the selected model. Predicted metric depth
+accuracy also affects floor filtering and obstacle distances.
+
+Current frontier generation and selection:
+
+1. OpenFrontier consumes RGB plus the selected depth. Its network predicts a
+   distance field and information-gain classes on a 320x320 crop. The current
+   config uses distance-field normalizer 10 and threshold 0.3.
+2. Depth gradients supply image-space directions; HDBSCAN clusters frontier
+   pixels using position, direction and depth. Each cluster is backprojected into
+   the measured world frame, producing a 3D anchor, viewing direction and gain.
+3. Captured-depth anchors must lie on valid depth pixels. The graph filters gain
+   below 0.5, distance above 7 m from the observing pose, steep vertical viewing
+   directions (`abs(vd_y) > 0.65`), and any configured floor-relative height bounds.
+   Compatible detections merge within 0.5 m and 30 degrees by default. Previously
+   viewed areas reduce gain, and reached/rejected frontiers are excluded.
+4. Among candidates linked to archived RGB observations, selection maximizes
+   `effective_gain / (1 + horizontal_distance)` multiplied by a forward-facing
+   reward `(1 + cos(bearing_error))/2` and the configured global directional
+   multiplier. Thus a nearby, useful frontier ahead is preferred. The active goal
+   is kept stable; reobservations do not move it.
+5. Depth navigation plans to that goal on its rolling obstacle map. Repeated
+   explicit low-quality matches can invalidate the target; missing detections
+   alone do not. A failed/stuck route can reject the target and trigger LoTIS
+   recovery. Reaching uses the current horizontal radius without heading matching
+   in handheld mode.
+
+The graph's explicit depth-occlusion rejection is currently disabled. Local A*
+planning handles obstacles but inflates them by 0.15 m and clears a 0.30 m region
+around its endpoints; frontier selection alone does not certify a free goal.
+The plotted frontier markers are learned 3D anchors, not occupancy-grid boundary
+extraction, and may still need rejection or a different viewpoint.
+
+For a measured floor reference, add `--camera-height` to the handheld command:
+
+```bash
+./scripts/run_handheld.sh --mode explore --scan-views 0 \
+  --camera-height 1.50 --record-dir runs/handheld/floor-test-01
+```
+
+Replace `1.50` with the measured vertical height in metres from the level floor
+below the camera to the RGB optical centre. Hold the camera at that height while
+the first fresh bridge frame arrives. The program fixes
+`floor_y = initial_camera_y - camera_height` in the current Y-up odometry frame.
+It does not shift, rescale or otherwise modify camera poses. Rerun draws the floor
+reference, puts the planar map/path overlays at that floor, and reports current
+camera height. The reference stays fixed if you raise or lower the camera; it is
+saved in the route initialization and graph settings. Restarting OpenVINS/bridge
+requires a new run and a newly established reference.
+
+With `--camera-height`, local navigation rejects ground returns within
+`--floor-clearance` of the fixed floor (default `0.05` m). Ground samples contribute
+free-space rays and free endpoints rather than occupied cells. Returns below that
+floor band are ignored; points above the band remain obstacle candidates. Objects
+at or below the clearance cannot be distinguished from ground by this height
+filter. The camera-relative upper cutoff is retained unless an explicit obstacle
+height band is supplied. Rerun reports ground/obstacle counts and the active band.
+A bad floor reference or drifting pose still needs correction; this filter does
+not estimate a floor plane or adjust the supplied height.
+
+Additional height filtering is optional. With `--camera-height`, you can set:
+
+- `--frontier-min-height` / `--frontier-max-height`: reject frontier anchors below
+  or above those heights, in metres above the floor.
+- `--obstacle-min-height` / `--obstacle-max-height`: select depth points for the
+  local obstacle map using that floor-relative band. The ground-clearance band
+  always applies; the effective lower limit is the larger of clearance and your
+  minimum. With an explicit minimum but no maximum, the upper side is unbounded.
+
+No frontier height limits are added merely by supplying camera height. Without a
+floor reference, the existing camera-relative obstacle filter is retained.
+These flags do not change arrival thresholds, collision validation,
+IMU calibration or odometry. This is a manually supplied horizontal floor, not
+floor-plane detection or tracking for stairs, slopes or multiple floor levels.
+
+The bridge uses system ROS Python, synchronizes RGB/aligned metric depth with
+bracketed IMU odometry, obtains IMU-to-RGB optical extrinsics from static TF,
+rectifies both images consistently, and converts world Z-up/optical axes into
+pipeline Y-up/-Z-forward axes. It uses reliable image QoS by default. Missing data
+never receives an invented identity pose. RGB-to-IMU time offset defaults to zero;
+`--camera-time-offset` on the bridge accepts a calibrated value (`t_imu=t_rgb+offset`).
+The previous IR offset is not silently substituted for RGB calibration.
+
+### Odometry failure and the large allocation error
+
+The failed office runs contain OpenVINS positions hundreds of kilometres from the
+origin. The old unbounded exploration grid tried to cover those positions,
+producing the reported 4.41 TiB allocation. This is invalid estimator input, not a
+reason to increase RAM or suppress the error. New checks stop before recording or
+mapping such input, and both exploration/local grids have explicit allocation
+budgets. No poses are clipped, recentered, or replaced with commanded motion.
+
+If an odometry fault appears, stop guidance and restart **OpenVINS and the bridge**,
+then use a new run directory. Confirm that estimated positions remain reasonable
+before walking. Restarting does not prove the underlying VIO drift is resolved;
+if it recurs, capture another sensor bag to diagnose it. The handheld defaults
+reject radius >100 m or speed >3 m/s; these are operating-envelope checks exposed
+as `--max-odometry-distance` and `--max-odometry-speed`, not estimator tuning.
+The bridge has matching checks and latches a fault until restarted. Stale input
+or expired commands show STOP. An inference exception prints its traceback.
+
+Each run saves `session.rrd`, `guidance.jsonl`, `graph.json`, and the shared
+pipeline's immutable `archive/` plus loop-pruned retrieval `frames/` and `route.json`.
+Use `--no-spawn` or `--display terminal` to record Rerun data without opening its
+viewer; `--rrd /path/session.rrd` chooses another recording path.
+
+The lighter independent modes remain available:
+
+```bash
+./scripts/run_handheld.sh --mode preview
+./scripts/run_handheld.sh --mode teach --record-dir runs/handheld/office-route
+./scripts/run_handheld.sh --mode follow --route runs/handheld/office-route
+# A shared-pipeline run can also be followed later using its active archived route:
+./scripts/run_handheld.sh --mode follow --route runs/handheld/office-full-01
+```
+
+Preview/teach/follow retain terminal/OpenCV displays (`--display terminal` for
+text only); their arrow window runs in system Python because the ML environment's
+OpenCV is headless. Full exploration uses Rerun. Run one handheld consumer at a
+time. ROS and ML exchange a single atomic latest snapshot under `/tmp/mapless-live`.
+
+Focused checks, without a camera or downloads:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -p 'test_handheld*.py' -v
+```

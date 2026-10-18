@@ -302,7 +302,9 @@ def drive(
         observation = capture(sim, agent)
         rgb = observation.rgb
         if intrinsics is None:
-            intrinsics = camera_intrinsics(rgb.shape[1], rgb.shape[0], 90.0)
+            intrinsics = observation.intrinsics
+            if intrinsics is None:
+                intrinsics = camera_intrinsics(rgb.shape[1], rgb.shape[0], 90.0)
         policy_obs = {
             "rgb": rgb, "rgb_pil": Image.fromarray(rgb), "intrinsics": intrinsics
         }
@@ -514,7 +516,10 @@ def navigate(
 ) -> None:
     """Reset to the start of the explored route and let LoTIS drive to its end."""
     view.set_paused(False)
-    agent.set_state(states[0])
+    if hasattr(sim, 'wait_for_retrieval_start'):
+        sim.wait_for_retrieval_start(states[0])
+    else:
+        agent.set_state(states[0])
     view.rr.log("goal", view.rr.Image(frames[-1]).compress(jpeg_quality=90))
     print("Encoding explored route...")
     encode_route(method, frames, "forward", positions=[state.position for state in states])

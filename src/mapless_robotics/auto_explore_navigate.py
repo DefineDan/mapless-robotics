@@ -150,7 +150,16 @@ def explore(
     object_search: ObjectSearch | None = None,
     object_worker: ObjectSearchWorker | None = None,
 ) -> bool:
-    navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
+    def _make_navigator(**options):
+        options.setdefault('require_goal_heading', graph.require_arrival_heading)
+        for name, value in getattr(sim, 'navigation_height_options', {}).items():
+            options.setdefault(name, value)
+        options.setdefault('camera_intrinsics', getattr(sim, 'camera_intrinsics', None))
+        if hasattr(sim, 'linear_speed'):
+            options.setdefault('linear_speed', sim.linear_speed)
+        return DepthNavigation(**options)
+
+    navigator = _make_navigator(goal_tolerance=graph.visited_distance)
     recovery_behaviour = RecoveryBehaviour()
     next_control = 0.0
     paused = False
@@ -259,8 +268,10 @@ def explore(
             frame_index, result = object_worker.poll()
             if result is None:
                 return
-            intrinsics = camera_intrinsics(
-                result.observation.rgb.shape[1], result.observation.rgb.shape[0], 90.0)
+            intrinsics = result.observation.intrinsics
+            if intrinsics is None:
+                intrinsics = camera_intrinsics(
+                    result.observation.rgb.shape[1], result.observation.rgb.shape[0], 90.0)
             if recovery is None and not route.pending_return:
                 object_search.update(result, intrinsics)
                 if object_search.target is not None and object_goal is None:
@@ -268,7 +279,8 @@ def explore(
                     object_goal = approach_position(object_search.target.position,
                                                     capture(sim, agent).robot_pose,
                                                     args.object_stand_off)
-                    navigator = DepthNavigation(goal_tolerance=graph.visited_distance, max_depth=5.0,
+                    navigator = _make_navigator(goal_tolerance=graph.visited_distance, max_depth=5.0,
+                                                require_goal_heading=True,
                                                 camera_intrinsics=intrinsics)
                     latest = worker.last_result or result
                     navigator.set_data(object_goal, latest.depth, latest.observation.camera_pose)
@@ -284,6 +296,9 @@ def explore(
             logger.exception('Object analysis failed; paused. Press f to retry, Space to resume')
 
     def restore_view(frame_index):
+        if hasattr(sim, 'restore_view'):
+            sim.restore_view(route.states[frame_index])
+            return
         state = agent.get_state()
         reference = route.states[frame_index]
         state.rotation = reference.rotation
@@ -299,7 +314,7 @@ def explore(
         if object_search is not None:
             object_search.reset_candidate()
             object_worker.discard()
-        view.log_navigation_map(DepthNavigation())
+        view.log_navigation_map(_make_navigator())
         objective = graph.objective_frontier
         if objective is not None:
             view.log_return_target(
@@ -410,7 +425,7 @@ def explore(
         route.pending_return = False
         graph.prune_after_return(route.active, pose_at(reached))
         restore_view(reached)
-        # navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
+        # navigator = _make_navigator(goal_tolerance=graph.visited_distance)
         recovery = None
         forward_retry = None
         paused = False
@@ -480,8 +495,11 @@ def explore(
             # Moves are not recorded, and the camera pitch stays fixed so LoTIS can still match.
             action = action_for_key(key_name(key))
             if key == ord('b'):
-                for _ in range(TURN_AROUND_STEPS):
-                    sim.step('turn_left')
+                if hasattr(sim, 'turn_around'):
+                    sim.turn_around()
+                else:
+                    for _ in range(TURN_AROUND_STEPS):
+                        sim.step('turn_left')
             elif action is not None and action not in ('look_up', 'look_down'):
                 sim.step(action)
             continue
@@ -495,7 +513,7 @@ def explore(
             object_frame_index = None
             paused = False
             view.set_paused(paused)
-            navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
+            navigator = _make_navigator(goal_tolerance=graph.visited_distance)
             recovery_behaviour.reset()
             view.clear_object_goal()
             force_analysis = True
@@ -513,7 +531,7 @@ def explore(
             selection_pending = True
             force_analysis = True
             discovery_done = False
-            # navigator = DepthNavigation()
+            # navigator = _make_navigator()
             view.log_navigation_map(navigator)
             print('Goal rejected; refreshing frontiers here before considering a return')
             graph.save(graph_output)
@@ -539,7 +557,7 @@ def explore(
         if object_goal is not None:
             now = time.monotonic()
             if not paused and not object_reached and now >= next_control:
-                if args.depth_source == 'habitat' and observation.depth is not None:
+                if args.depth_source in ('habitat', 'realsense') and observation.depth is not None:
                     navigator.set_data(object_goal, observation.depth, observation.camera_pose)
                 distance = np.linalg.norm((object_goal - state.position)[[0, 2]])
                 linear = angular = 0.0
@@ -622,7 +640,7 @@ def explore(
             if graph.objective_frontier is None:
                 collect(wait=True)
                 objective = None
-                # navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
+                # navigator = _make_navigator(goal_tolerance=graph.visited_distance)
                 force_analysis = True
                 discovery_done = False
                 selection_pending = True
@@ -656,7 +674,7 @@ def explore(
                 restore_view(target.frame_index)
                 observation = capture(sim, agent)
                 state = agent.get_state()
-                # navigator = DepthNavigation(goal_tolerance=graph.visited_distance)
+                # navigator = _make_navigator(goal_tolerance=graph.visited_distance)
                 # if observation.depth is not None:
                 #     navigator.set_data(objective.position, observation.depth, observation.camera_pose)
                 force_analysis = True
@@ -677,7 +695,11 @@ def explore(
             # if observation.depth is not None:
             #     navigator.set_data(objective.position, observation.depth, observation.camera_pose)
             if navigator.goal is not None:
-
+                if args.depth_source == 'realsense' and observation.depth is not None:
+                    if getattr(navigator, '_live_depth_stamp', None) != observation.timestamp:
+                        navigator.set_data(objective.position, observation.depth, observation.camera_pose,
+                                           angle_objective=navigator.angle_objective)
+                        navigator._live_depth_stamp = observation.timestamp
                 trajectory_size = navigator.get_size_trajectory()
                 if recovery_behaviour.is_stuck(observation, trajectory_size):
                     rejected = graph.objective_frontier
@@ -687,7 +709,7 @@ def explore(
                     selection_pending = True
                     force_analysis = True
                     discovery_done = False
-                    # navigator = DepthNavigation()
+                    # navigator = _make_navigator()
                     view.log_navigation_map(navigator)
                     print('Goal rejected; refreshing frontiers here before considering a return')
 

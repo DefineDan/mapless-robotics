@@ -97,7 +97,7 @@ class ExplorationGraph:
         max_vectical_vec=0.65,
         upward_pose="y",
         fusion_angle_degrees=30.0,
-        visited_distance=0.1,
+        visited_distance=1.0,
         u_gain_reduction_percentage=1.0,
         u_gain_threshold=0.1,
         enable_occupancy=True,
@@ -108,6 +108,10 @@ class ExplorationGraph:
         val_depth_width=10,
         depth_validity_threshold=0.5,
         auto_select_objective=True,
+        floor_height=None,
+        minimum_frontier_height=None,
+        maximum_frontier_height=None,
+        require_arrival_heading=True,
     ):
         if not np.isfinite(merge_distance) or merge_distance < 0:
             raise ValueError("merge_distance must be finite and nonnegative")
@@ -127,6 +131,11 @@ class ExplorationGraph:
         axis_indices = {"x": 0, "y": 1, "z": 2}
         if upward_pose not in axis_indices:
             raise ValueError("upward_pose must be one of 'x', 'y', or 'z'")
+        from ..floor_reference import validate_height_band
+        validate_height_band(floor_height, minimum_frontier_height, maximum_frontier_height)
+        self.floor_height = floor_height
+        self.minimum_frontier_height = minimum_frontier_height
+        self.maximum_frontier_height = maximum_frontier_height
         self.upward_pose = upward_pose
         self.idx_upward = axis_indices[upward_pose]
         self.plane_idx = np.ones(3, dtype=bool)
@@ -136,6 +145,7 @@ class ExplorationGraph:
         )
         self.fusion_angle_degrees = float(fusion_angle_degrees)
         self.visited_distance = float(visited_distance)
+        self.require_arrival_heading = bool(require_arrival_heading)
         self.u_gain_reduction_percentage = float(u_gain_reduction_percentage)
         self.u_gain_threshold = float(u_gain_threshold)
         if val_depth_width < 1:
@@ -192,11 +202,11 @@ class ExplorationGraph:
             camera_pose,
             frame_index,
         )
-        self.poses[node_id] = node
-        self.path_parent_id = node_id
         if self.ena_map is not None:
             camera_view = camera_pose if camera_pose is not None else pose
             self.ena_map.add_pose(camera_view, self.camera_intrinsics)
+        self.poses[node_id] = node
+        self.path_parent_id = node_id
         self._apply_pose_visit(node)
         return node
 
@@ -324,6 +334,11 @@ class ExplorationGraph:
         gain = frontier.u_gain if frontier.u_gain is not None else frontier.gain
         if gain is None or not np.isfinite(gain) or gain < self.minimum_gain:
             return False
+        if self.floor_height is not None:
+            height = float(frontier.position[self.idx_upward])-self.floor_height
+            if ((self.minimum_frontier_height is not None and height < self.minimum_frontier_height)
+                    or (self.maximum_frontier_height is not None and height > self.maximum_frontier_height)):
+                return False
         parent_position = np.asarray(self.poses[pose_id].pose, dtype=float)[:3, 3]
 
         dist_parent = np.linalg.norm(frontier.position - parent_position)
@@ -344,7 +359,7 @@ class ExplorationGraph:
         # earlier camera pose when occupancy mapping is disabled).
         if frontier.pose6d is not None:
             if self.ena_map is not None:
-                if self.ena_map.is_occupied(frontier.pose6d[[self.idx_upward], 3])[0]:
+                if self.ena_map.is_occupied(frontier.pose6d[:3, 3][self.plane_idx])[0]:
                     return False
             else:
                 camera_poses = [p.camera_pose for p in self.poses.values() if p.camera_pose is not None]
@@ -607,8 +622,9 @@ class ExplorationGraph:
     def eval_objective(self, pose, look_ahead_vector):
         """Return the active objective, replacing it when reached.
 
-        Reaching requires being within ``visited_distance`` and facing the
-        objective within ``fusion_angle_degrees``. On arrival the old target is
+        Reaching requires being within ``visited_distance``. When
+        ``require_arrival_heading`` is true, the camera must also match the
+        frontier direction within ``fusion_angle_degrees``. On arrival the old target is
         retired, then the next target is selected. With ``auto_select_objective``
         disabled, arrival clears the objective so the launcher can refresh its
         view before selecting. An exact positional match also counts as arrival.
@@ -620,6 +636,11 @@ class ExplorationGraph:
         position = self._position_from_pose(pose)
         to_goal = (objective.position - position)[self.plane_idx]
         distance = float(np.linalg.norm(to_goal))
+        if not self.require_arrival_heading:
+            if distance <= self.visited_distance:
+                self.retire(objective, 'reached')
+                return self.select_frontier(pose) if self.auto_select_objective else None
+            return objective
         direction = np.asarray(look_ahead_vector, dtype=float)
         if direction.shape == (4, 4):
             direction = self._camera_forward(direction)
@@ -811,8 +832,12 @@ class ExplorationGraph:
                 "maximum_parent_distance": self.maximum_parent_distance,
                 "max_vectical_vec": self.max_vectical_vec,
                 "upward_pose": self.upward_pose,
+                "floor_height": self.floor_height,
+                "minimum_frontier_height": self.minimum_frontier_height,
+                "maximum_frontier_height": self.maximum_frontier_height,
                 "fusion_angle_degrees": self.fusion_angle_degrees,
                 "visited_distance": self.visited_distance,
+                "require_arrival_heading": self.require_arrival_heading,
                 "u_gain_reduction_percentage": self.u_gain_reduction_percentage,
                 "u_gain_threshold": self.u_gain_threshold,
                 "enable_occupancy": self.enable_occupancy,
