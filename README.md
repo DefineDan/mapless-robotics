@@ -93,3 +93,4 @@ Outputs are written to `runs/auto_explore_navigate/<timestamp>/`.
 - [Object search](docs/object_search.md): Qwen and OWLv2 detection and confirmation
 - [Noisy odometry](docs/odometry.md): noise model and where drift affects the pipeline
 - [Other scripts](docs/other_scripts.md): `walk`, `walk_frontiers`, `teach_repeat`, `explore_navigate`
+- [RealSense handheld setup and usage](https://github.com/DefineDan/mapless-robotics/blob/realsense_test/README.md): setup and run the real-camera pipeline (`realsense_test` branch).
