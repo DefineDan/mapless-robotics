@@ -97,7 +97,7 @@ class ExplorationGraph:
         max_vectical_vec=0.65,
         upward_pose="y",
         fusion_angle_degrees=30.0,
-        visited_distance=0.5,
+        visited_distance=0.1,
         u_gain_reduction_percentage=1.0,
         u_gain_threshold=0.1,
         enable_occupancy=True,
@@ -108,6 +108,7 @@ class ExplorationGraph:
         val_depth_width=10,
         depth_validity_threshold=0.5,
         auto_select_objective=True,
+        compare_frontiers_2d=True,
     ):
         if not np.isfinite(merge_distance) or merge_distance < 0:
             raise ValueError("merge_distance must be finite and nonnegative")
@@ -131,6 +132,12 @@ class ExplorationGraph:
         self.idx_upward = axis_indices[upward_pose]
         self.plane_idx = np.ones(3, dtype=bool)
         self.plane_idx[self.idx_upward] = False
+        # Retired-frontier suppression can compare in the ground plane or in
+        # full xyz. Keep the existing 3D behavior unless explicitly enabled.
+        self.comp_axis_front = (
+            np.array([0, 1, 2])[self.plane_idx]
+            if compare_frontiers_2d else np.array([0, 1, 2])
+        )
         self.max_vectical_vec = (
             None if max_vectical_vec is None else float(max_vectical_vec)
         )
@@ -467,7 +474,8 @@ class ExplorationGraph:
         position = np.asarray(frontier.pos3d, dtype=float)
         if position.shape != (3,) or not np.isfinite(position).all():
             raise ValueError("Frontier position must be a finite xyz vector")
-        if any(np.linalg.norm(position - np.asarray(item['frontier']['position']))
+        if any(np.linalg.norm((position - np.asarray(item['frontier']['position']))
+                              [self.comp_axis_front])
                <= max(self.merge_distance, self.visited_distance)
                for item in self.retired_frontiers):
             return None
@@ -628,13 +636,36 @@ class ExplorationGraph:
         elif direction.shape != (2,):
             raise ValueError("look_ahead_vector must have 2 or 3 components, or be a 4x4 pose")
         direction_norm = float(np.linalg.norm(direction))
-        goal_norm = distance
-        if goal_norm == 0:
+        # A frontier's view direction is the orientation it should be seen
+        # from. Compare that with the robot camera's view direction; the
+        # bearing to the frontier is unrelated to the frontier's orientation.
+        frontier_direction = objective.vd
+        if frontier_direction is None and objective.pose6d is not None:
+            # OpenFrontier frontier poses use the CV convention (+Z forward).
+            frontier_direction = np.asarray(objective.pose6d, dtype=float)[:3, 2]
+        if frontier_direction is not None:
+            frontier_direction = np.asarray(frontier_direction, dtype=float)
+            if frontier_direction.shape == (3,):
+                frontier_direction = frontier_direction[self.plane_idx]
+        if distance == 0:
             self.retire(objective, 'reached')
             return self.select_frontier(pose) if self.auto_select_objective else None
-        if direction_norm == 0 or not np.isfinite(direction).all():
+        if (
+            direction_norm == 0
+            or not np.isfinite(direction).all()
+            or frontier_direction is None
+            or frontier_direction.shape != (2,)
+            or not np.isfinite(frontier_direction).all()
+        ):
             return objective
-        cosine = float(np.clip(np.dot(direction, to_goal) / (direction_norm * goal_norm), -1.0, 1.0))
+        frontier_norm = float(np.linalg.norm(frontier_direction))
+        if frontier_norm == 0:
+            return objective
+        cosine = float(np.clip(
+            np.dot(direction, frontier_direction) / (direction_norm * frontier_norm),
+            -1.0,
+            1.0,
+        ))
         angle = float(np.degrees(np.arccos(cosine)))
         if distance <= self.visited_distance and angle <= self.fusion_angle_degrees:
             self.retire(objective, 'reached')
@@ -734,10 +765,12 @@ class ExplorationGraph:
         matches = [frontier for frontier in result.frontiers
                    if np.shape(frontier.pos3d) == (3,)
                    and np.isfinite(frontier.pos3d).all()
-                   and np.linalg.norm(np.asarray(frontier.pos3d) - objective.position)
+                   and np.linalg.norm((np.asarray(frontier.pos3d) - objective.position)
+                                      [self.comp_axis_front])
                    <= max(self.merge_distance, self.visited_distance)]
         match = min(matches, key=lambda frontier: np.linalg.norm(
-            np.asarray(frontier.pos3d) - objective.position), default=None)
+            (np.asarray(frontier.pos3d) - objective.position)[self.comp_axis_front]),
+            default=None)
         gain = getattr(match, 'gain', None)
         if match is None:
             status, count = 'not_observed', 0
@@ -799,6 +832,7 @@ class ExplorationGraph:
                 "camera_intrinsics": _json_value(self.camera_intrinsics),
                 "val_depth_width": self.val_depth_width,
                 "depth_validity_threshold": self.depth_validity_threshold,
+                "compare_frontiers_2d": len(self.comp_axis_front) == 2,
             },
             "poses": [_json_value(asdict(node)) for node in self.poses.values()],
             "frontiers": [
