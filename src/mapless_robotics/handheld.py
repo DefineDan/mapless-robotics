@@ -19,6 +19,7 @@ import time
 import numpy as np
 
 from .handheld_guidance import Advice, RouteRecorder, draw_advice, load_route
+from .handheld_follow_view import FollowPrediction, FollowReference, prediction_snapshot
 from .live_io import atomic_json, guidance_status, read_frame, OdometryGuard, OdometryFault
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -55,6 +56,7 @@ class LivePolicy:
             base.setup()
             self.method = LoTISRoutePolicy(base, max_speed=args.speed)
             images, positions = load_route(args.route, base.localizer.max_seq_len)
+            self.follow_reference = FollowReference(tuple(images), np.array(positions, copy=True), args.direction)
             self.method.reset_episode(dict(rgb_images=images, route_positions=positions,
                                            tracking_mode=args.direction, goal_point_id=None))
 
@@ -82,13 +84,15 @@ class LivePolicy:
             # Recorded positions define reference arc length only. Live odometry
             # starts in a different world frame, so never compare endpoints directly.
             action = self.method.act(dict(rgb=frame.rgb, rgb_pil=Image.fromarray(frame.rgb), intrinsics=frame.intrinsics))
+            prediction = (prediction_snapshot(self.method, self.follow_reference, frame)
+                          if getattr(self, 'follow_reference', None) is not None else None)
             status = str(self.method.diagnostics.get('status', 'tracking'))
             if self.method.arrived:
                 self.finished = True
-                return Advice(status='LoTIS endpoint detected; stop and verify arrival'), None
+                return Advice(status='LoTIS endpoint detected; stop and verify arrival'), prediction
             if self.method.navigation_failed:
-                return Advice(status='Reference route lost; stop and retry'), None
-            return Advice(action.linear_velocity, action.angular_velocity, 'LoTIS '+status), None
+                return Advice(status='Reference route lost; stop and retry'), prediction
+            return Advice(action.linear_velocity, action.angular_velocity, 'LoTIS '+status), prediction
         return Advice(status='RECORDING: walk the demonstration route' if self.args.mode == 'teach' else 'PREVIEW: synchronized camera and odometry'), None
 
 
@@ -96,7 +100,10 @@ def make_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=['preview', 'teach', 'explore', 'follow'], default='explore')
     parser.add_argument('--stream-dir', type=Path, default=Path('/tmp/mapless-live'))
-    parser.add_argument('--display', choices=['terminal', 'opencv', 'both'], default='both')
+    parser.add_argument('--display', choices=['rerun', 'terminal', 'opencv', 'both'],
+                        help='Default: rerun for follow; both for preview/teach')
+    parser.add_argument('--no-spawn', action='store_true', help='Record Rerun without opening a viewer (use --display rerun)')
+    parser.add_argument('--rrd', type=Path, help='Rerun output recording (default: new run directory/session.rrd)')
     parser.add_argument('--viewer-python', default='/usr/bin/python3', help='Python with GUI OpenCV; isolated from ML dependencies')
     parser.add_argument('--record-dir', type=Path, help='New route/output directory; never overwrite an existing route')
     parser.add_argument('--route', type=Path, help='Recorded directory containing route.json (follow mode)')
@@ -127,6 +134,10 @@ def main():
         return full_pipeline(remaining)
     parser = make_parser()
     args = parser.parse_args()
+    if args.display is None:
+        args.display = 'rerun' if args.mode == 'follow' else 'both'
+    if args.display != 'rerun' and (args.no_spawn or args.rrd is not None):
+        parser.error('--no-spawn/--rrd require --display rerun')
     for name in ['interval', 'max_frame_age', 'max_advice_age', 'speed']:
         if not np.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             parser.error(name.replace('_', '-')+' must be finite and positive')
@@ -135,6 +146,9 @@ def main():
     if args.mode == 'follow' and args.route is None:
         parser.error('--mode follow requires --route')
     output = args.record_dir or Path('runs/handheld')/datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')
+    if args.mode == 'follow' and (output.resolve() == args.route.resolve() or
+            (args.rrd is not None and args.rrd.resolve() == (args.route/'session.rrd').resolve())):
+        parser.error('Choose a new output directory/recording; the source route must stay unchanged')
     recorder = RouteRecorder(output) if args.mode in ('teach', 'explore') else None
     output.mkdir(parents=True, exist_ok=True)
     print('HANDHELD GUIDANCE ONLY | space: pause | f: analyze | g: save | q: quit', flush=True)
@@ -154,6 +168,9 @@ def main():
     pose_guard = OdometryGuard()
     started = time.monotonic()
     viewer = None
+    rerun_view = None
+    follow_prediction = None
+    last_rerun = 0.
     last_viewer_key = None
     with ExitStack() as stack:
         args.stream_dir.mkdir(parents=True, exist_ok=True)
@@ -168,7 +185,11 @@ def main():
         if args.display != 'opencv' and sys.stdin.isatty():
             from .terminal_keyboard import TerminalKeyboard
             keyboard = stack.enter_context(TerminalKeyboard())
-        if args.display != 'terminal':
+        if args.display == 'rerun':
+            from .handheld_follow_view import FollowRerunView
+            rerun_view = FollowRerunView(spawn=not args.no_spawn, save_path=args.rrd or output/'session.rrd')
+            print('Rerun follow view | controls stay in this terminal: Space pause/resume, f analyze, q quit', flush=True)
+        if args.display in ('opencv', 'both'):
             (args.stream_dir/'viewer_key.json').unlink(missing_ok=True)
             environment = os.environ.copy()
             environment['PYTHONPATH'] = str(PROJECT_ROOT/'src')+os.pathsep+environment.get('PYTHONPATH', '')
@@ -211,8 +232,10 @@ def main():
                 if future is not None and future.done():
                     try:
                         advice, marked = future.result()
+                        follow_prediction = marked if isinstance(marked, FollowPrediction) else None
                         advice_frame = pending_frame if not paused and pending_generation == generation else None
                     except Exception as error:
+                        follow_prediction = None
                         advice = Advice(status=f'Inference error: {error}')
                         advice_frame = pending_frame
                         paused = True
@@ -242,6 +265,9 @@ def main():
                 status = guidance_status(frame, advice_frame, paused=paused,
                                          max_frame_age=args.max_frame_age, max_advice_age=args.max_advice_age)
                 shown = Advice(status=status) if status else advice
+                if rerun_view is not None and time.monotonic()-last_rerun >= .1:
+                    rerun_view.log(frame, shown, follow_prediction, prediction_valid=status is None)
+                    last_rerun = time.monotonic()
                 if time.monotonic()-last_print >= .5:
                     guidance_log.write(json.dumps(dict(time=time.time(), linear=shown.linear, angular=shown.angular, status=shown.status, instruction=shown.instruction, source_timestamp=advice_frame.timestamp if advice_frame else None))+'\n')
                     guidance_log.flush()
@@ -259,6 +285,8 @@ def main():
             pass
         finally:
             print(Advice(status='Session stopped').terminal(), flush=True)
+            if rerun_view is not None:
+                rerun_view.close()
             if recorder:
                 if last_recorded_frame is not None:
                     recorder.add(last_recorded_frame, force=True)
