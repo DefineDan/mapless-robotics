@@ -677,29 +677,42 @@ intentionally stay on ground truth.
 
 -Scene 0: data/hm3d-train-habitat-v0.2/00352-zmZvNTCxMZE/zmZvNTCxMZE.basis.glb 60,666
 
-  - 20, seed: 2 => 29,223, 
-  - 20, seed: 2, noise => 28,824, #16522 
-  - -1, seed: 2 => 25,488, 
-  - -1, seed: 2, noise => 25,789, 
+  - 20, seed: 2 => 29,223,  === 0.48
+  - 20, seed: 2, noise => 28,824, #16522 === 0.475
+  - -1, seed: 2 => 25,488, === 0.420
+  - -1, seed: 2, noise => 25,789, === 0.425
 
 -Scene 1: data/hm3d-train-habitat-v0.2/00005-yPKGKBCyYx8/yPKGKBCyYx8.basis.glb 54,260
 
-  - 20, seed: 2 => 34,216, #35400 
-  - 20, seed: 2, noise => 28,120 # 20000
-  - -1, seed: 2 => 29,600, #20000
-  - -1, seed: 2, noise => 33,287 #20000
+  - 20, seed: 2 => 34,216, #35400 === 0.63
+  - 20, seed: 2, noise => 28,120 # 20000 === 0.5182
+  - -1, seed: 2 => 29,600, #20000 === 0.5455
+  - -1, seed: 2, noise => 33,287 #20000 === 0.613
 
 
 -Scene 2: data/hm3d-train-habitat-v0.2/00231-4h4JxvG3cip/4h4JxvG3cip.basis.glb 45,743
 
-  - 20, seed: 2 => 5,330, #2879
-  - 20, seed: 2, noise => 19,931 # 11902
-  - -1, seed: 2 => 29,357 # 20000
-  - -1, seed: 2, noise => 25,958
+  - 20, seed: 2 => 5,330, #2879 === 0.116
+  - 20, seed: 2, noise => 19,931 # 11902 === 0.4357
+  - -1, seed: 2 => 29,357 # 20000 === 0.641
+  - -1, seed: 2, noise => 25,958 === 0.567
 
 
 -Scene 3: data/hm3d-train-habitat-v0.2/00177-VSxVP19Cdyw/VSxVP19Cdyw.basis.glb 57,492
+
+  - 20, seed: 2 => 18,894 # 9904 === 0.3286
+  - 20, seed: 2, noise => 27,377 # 20000 === 0.476 
+  - -1, seed: 2 => 14,132 # 5959 === 0.2458
+  - -1, seed: 2, noise => 25,263 # 12152 === 0.439
+
+
 -Scene 5: data/hm3d-train-habitat-v0.2/00715-kjUg7BaQF1C/kjUg7BaQF1C.basis.glb 101,162
+
+  - 20, seed: 2 => 17852 # 7714 === 0.176
+  - 20, seed: 2, noise => 15950 # 7594 === 0.157
+  - -1, seed: 2 => 21082 # 6829 === 0.208
+  - -1, seed: 2, noise => 18719 # 6930 === 0.185
+
 -Scene 6: data/hm3d-train-habitat-v0.2/00675-c6TFyURFrL4/c6TFyURFrL4.basis.glb 82,980
 -Scene 7: data/hm3d-train-habitat-v0.2/00659-ZVPMj4YoZtK/ZVPMj4YoZtK.basis.glb 65,175
 -Scene 12: data/hm3d-train-habitat-v0.2/00609-x1pTUWx9DPr/x1pTUWx9DPr.basis.glb 78,536
