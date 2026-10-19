@@ -257,6 +257,8 @@ def make_parser():
                              'noise*sqrt(radians + metres) in yaw (default: 0, ground-truth pose)')
     parser.add_argument('--odometry-seed', type=int,
                         help='Seed for the odometry noise (default: the start seed)')
+    parser.add_argument('--map-pixel-report-every', type=int, default=10,
+                        help='Print observed exploration-map pixels every N added poses (default: 10; 0 disables)')
     return parser
 
 
@@ -860,9 +862,16 @@ def main():
         parser.error('--max-steps and --integration-time must be positive')
     if not np.isfinite(args.odometry_noise) or args.odometry_noise < 0:
         parser.error('--odometry-noise must be finite and non-negative')
+    if args.map_pixel_report_every < 0:
+        parser.error('--map-pixel-report-every must be nonnegative')
     try:
         scene = resolve_scene(args.scene, args.index, args.scenes_dir)
-        graph = ExplorationGraph(args.merge_distance, auto_select_objective=False)
+        graph = ExplorationGraph(
+            args.merge_distance,
+            auto_select_objective=False,
+            enable_ground_truth_occupancy=True,
+            ground_truth_occupancy_report_every=args.map_pixel_report_every,
+        )
         trigger = AnalysisTrigger(args.exploration, args.interval,
                                   args.movement_distance, args.movement_angle)
     except (ValueError, FileNotFoundError) as error:

@@ -109,6 +109,9 @@ class ExplorationGraph:
         depth_validity_threshold=0.5,
         auto_select_objective=True,
         compare_frontiers_2d=True,
+        occupancy_report_every=0,
+        enable_ground_truth_occupancy=False,
+        ground_truth_occupancy_report_every=0,
     ):
         if not np.isfinite(merge_distance) or merge_distance < 0:
             raise ValueError("merge_distance must be finite and nonnegative")
@@ -154,8 +157,19 @@ class ExplorationGraph:
         self._depth_images: dict[int, np.ndarray] = {}
         self.enable_occupancy = bool(enable_occupancy)
         self.ena_map = (
-            ExplorationMap(occupancy_ini_depth, occupancy_end_depth, occupancy_resolution)
+            ExplorationMap(occupancy_ini_depth, occupancy_end_depth, occupancy_resolution,
+                           report_every=occupancy_report_every)
             if self.enable_occupancy else None
+        )
+        self.gt_ena_map = (
+            ExplorationMap(
+                occupancy_ini_depth,
+                occupancy_end_depth,
+                occupancy_resolution,
+                report_every=ground_truth_occupancy_report_every,
+                report_name="Ground-truth exploration map",
+            )
+            if self.enable_occupancy and enable_ground_truth_occupancy else None
         )
         # Runtime camera: 640x480 with Habitat's 90 degree horizontal FOV by default.
         self.camera_intrinsics = (
@@ -176,7 +190,8 @@ class ExplorationGraph:
         self.objective_check = {}
 
     def add_pose(
-        self, node_id, pose, parent_id, timestamp, camera_pose=None, frame_index=None
+        self, node_id, pose, parent_id, timestamp, camera_pose=None, frame_index=None,
+        gt_camera_pose=None,
     ):
         if node_id in self.poses:
             raise ValueError(f"Pose ID {node_id} already exists")
@@ -184,6 +199,7 @@ class ExplorationGraph:
             raise ValueError(f"Unknown parent pose {parent_id}")
         pose = pose_matrix(pose)
         camera_pose = None if camera_pose is None else pose_matrix(camera_pose)
+        gt_camera_pose = None if gt_camera_pose is None else pose_matrix(gt_camera_pose)
         if not np.isfinite(timestamp):
             raise ValueError("timestamp must be finite")
         distance = 0.0
@@ -204,6 +220,8 @@ class ExplorationGraph:
         if self.ena_map is not None:
             camera_view = camera_pose if camera_pose is not None else pose
             self.ena_map.add_pose(camera_view, self.camera_intrinsics)
+        if self.gt_ena_map is not None and gt_camera_pose is not None:
+            self.gt_ena_map.add_pose(gt_camera_pose, self.camera_intrinsics)
         self._apply_pose_visit(node)
         return node
 
@@ -674,13 +692,14 @@ class ExplorationGraph:
 
     def add_frontiers_graph(
         self, frontiers, robot_pose, timestamp, camera_pose=None, frame_index=None,
-        depth=None,
+        depth=None, gt_camera_pose=None,
     ):
         """Append a capture, linking to the latest capture or returned-to pose."""
         parent_id = self.path_parent_id
         pose_id = max(self.poses, default=-1) + 1
         self.add_pose(
-            pose_id, robot_pose, parent_id, timestamp, camera_pose, frame_index
+            pose_id, robot_pose, parent_id, timestamp, camera_pose, frame_index,
+            gt_camera_pose,
         )
         if depth is not None:
             depth_image = np.array(depth, dtype=np.float32, copy=True)

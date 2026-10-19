@@ -200,6 +200,7 @@ class ExplorationWorker:
             observation.camera_pose,
             frame_index,
             depth=result.depth,
+            gt_camera_pose=observation.gt_camera_pose,
         )
         self.last_result = result
         return pose_id, result

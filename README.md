@@ -675,22 +675,46 @@ intentionally stay on ground truth.
 
 ## Scenes to test:
 
-- data/hm3d-train-habitat-v0.2/00352-zmZvNTCxMZE/zmZvNTCxMZE.basis.glb
-- data/hm3d-train-habitat-v0.2/00005-yPKGKBCyYx8/yPKGKBCyYx8.basis.glb
-- data/hm3d-train-habitat-v0.2/00231-4h4JxvG3cip/4h4JxvG3cip.basis.glb
-- data/hm3d-train-habitat-v0.2/00177-VSxVP19Cdyw/VSxVP19Cdyw.basis.glb
-- data/hm3d-train-habitat-v0.2/00548-otTm4oTrHvc/otTm4oTrHvc.basis.glb
-- data/hm3d-train-habitat-v0.2/00715-kjUg7BaQF1C/kjUg7BaQF1C.basis.glb
-- data/hm3d-train-habitat-v0.2/00675-c6TFyURFrL4/c6TFyURFrL4.basis.glb
-- data/hm3d-train-habitat-v0.2/00659-ZVPMj4YoZtK/ZVPMj4YoZtK.basis.glb
-- data/hm3d-train-habitat-v0.2/00080-gPf8XzHACGn/gPf8XzHACGn.basis.glb
-- data/hm3d-train-habitat-v0.2/00559-53jtKd53a1X/53jtKd53a1X.basis.glb
-- data/hm3d-train-habitat-v0.2/00777-N17ddiDvJr9/N17ddiDvJr9.basis.glb
-- data/hm3d-train-habitat-v0.2/00353-8qbZhbTc1wX/8qbZhbTc1wX.basis.glb
-- data/hm3d-train-habitat-v0.2/00609-x1pTUWx9DPr/x1pTUWx9DPr.basis.glb
-- data/hm3d-train-habitat-v0.2/00301-JiHGQpwKUvd/JiHGQpwKUvd.basis.glb
-- data/hm3d-train-habitat-v0.2/00067-osQy15y8EVT/osQy15y8EVT.basis.glb
+-Scene 0: data/hm3d-train-habitat-v0.2/00352-zmZvNTCxMZE/zmZvNTCxMZE.basis.glb 60,666
 
+  - 20, seed: 2 => 29,223, 
+  - 20, seed: 2, noise => 28,824, #16522 
+  - -1, seed: 2 => 25,488, 
+  - -1, seed: 2, noise => 25,789, 
+
+-Scene 1: data/hm3d-train-habitat-v0.2/00005-yPKGKBCyYx8/yPKGKBCyYx8.basis.glb 54,260
+
+  - 20, seed: 2 => 34,216, #35400 
+  - 20, seed: 2, noise => 28,120 # 20000
+  - -1, seed: 2 => 29,600, #20000
+  - -1, seed: 2, noise => 33,287 #20000
+
+
+-Scene 2: data/hm3d-train-habitat-v0.2/00231-4h4JxvG3cip/4h4JxvG3cip.basis.glb 45,743
+
+  - 20, seed: 2 => 5,330, #2879
+  - 20, seed: 2, noise => 19,931 # 11902
+  - -1, seed: 2 => 29,357 # 20000
+  - -1, seed: 2, noise => 25,958
+
+
+-Scene 3: data/hm3d-train-habitat-v0.2/00177-VSxVP19Cdyw/VSxVP19Cdyw.basis.glb 57,492
+-Scene 5: data/hm3d-train-habitat-v0.2/00715-kjUg7BaQF1C/kjUg7BaQF1C.basis.glb 101,162
+-Scene 6: data/hm3d-train-habitat-v0.2/00675-c6TFyURFrL4/c6TFyURFrL4.basis.glb 82,980
+-Scene 7: data/hm3d-train-habitat-v0.2/00659-ZVPMj4YoZtK/ZVPMj4YoZtK.basis.glb 65,175
+-Scene 12: data/hm3d-train-habitat-v0.2/00609-x1pTUWx9DPr/x1pTUWx9DPr.basis.glb 78,536
+-Scene 9: data/hm3d-train-habitat-v0.2/00559-53jtKd53a1X/53jtKd53a1X.basis.glb 126,233
+-Scene 10: data/hm3d-train-habitat-v0.2/00777-N17ddiDvJr9/N17ddiDvJr9.basis.glb 82,596
+
+
+
+
+-Scene 8: data/hm3d-train-habitat-v0.2/00080-gPf8XzHACGn/gPf8XzHACGn.basis.glb
+-Scene 11: data/hm3d-train-habitat-v0.2/00353-8qbZhbTc1wX/8qbZhbTc1wX.basis.glb
+-Scene 13: data/hm3d-train-habitat-v0.2/00301-JiHGQpwKUvd/JiHGQpwKUvd.basis.glb
+-Scene 14: data/hm3d-train-habitat-v0.2/00067-osQy15y8EVT/osQy15y8EVT.basis.glb
+
+-Scene 4: data/hm3d-train-habitat-v0.2/00548-otTm4oTrHvc/otTm4oTrHvc.basis.glb
 
 - data/hm3d-train-habitat-v0.2/00700-aosjAwX5Lnq/aosjAwX5Lnq.basis.glb
 - data/hm3d-train-habitat-v0.2/00744-1S7LAXRdDqK/1S7LAXRdDqK.basis.glb

@@ -11,15 +11,21 @@ class ExplorationMap:
     outside its current bounds.
     """
 
-    def __init__(self, ini_depth=0.1, end_depth=5.0, resolution=0.05):
+    def __init__(self, ini_depth=0.1, end_depth=5.0, resolution=0.05,
+                 report_every=0, report_name="Exploration map"):
         if not (np.isfinite(ini_depth) and np.isfinite(end_depth)
                 and 0 <= ini_depth < end_depth):
             raise ValueError("depth limits must satisfy 0 <= ini_depth < end_depth")
         if not np.isfinite(resolution) or resolution <= 0:
             raise ValueError("resolution must be finite and positive")
+        if not isinstance(report_every, (int, np.integer)) or report_every < 0:
+            raise ValueError("report_every must be a nonnegative integer")
         self.ini_depth = float(ini_depth)
         self.end_depth = float(end_depth)
         self.resolution = float(resolution)
+        self.report_every = int(report_every)
+        self.report_name = str(report_name)
+        self.pose_updates = 0
         self.origin = np.array([-end_depth, -end_depth], dtype=float)
         size = int(np.ceil(2 * end_depth / resolution))
         self.map = np.zeros((size, size), dtype=np.uint8)
@@ -36,6 +42,14 @@ class ExplorationMap:
         cannot modify the map accidentally.
         """
         return self.map.copy(), (float(self.origin[0]), float(self.origin[1]), 0.0)
+
+    def count_pixels(self):
+        """Return the number of map cells marked as observed."""
+        return int(np.count_nonzero(self.map == 255))
+
+    def print_pixel_count(self):
+        """Print the number of observed map cells."""
+        print(f"{self.report_name}: {self.count_pixels():,} observed pixels")
 
     def _cell(self, xy):
         return np.floor((np.asarray(xy) - self.origin) / self.resolution).astype(int)
@@ -111,6 +125,9 @@ class ExplorationMap:
                    & (horizontal_angle >= angles[0])
                    & (horizontal_angle <= angles[1]))
         self.map[lo[1]:hi[1]+1, lo[0]:hi[0]+1][visible] = 255
+        self.pose_updates += 1
+        if self.report_every and self.pose_updates % self.report_every == 0:
+            self.print_pixel_count()
 
     def is_occupied(self, positions):
         """Return a bool per world ``(x, z)`` position, true if previously seen."""

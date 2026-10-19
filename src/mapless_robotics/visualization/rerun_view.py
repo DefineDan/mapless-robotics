@@ -197,6 +197,40 @@ class RerunView:
                     f"resolution={graph.ena_map.resolution:.3f} m/cell"
                 ),
             )
+        if graph is not None and graph.gt_ena_map is not None:
+            grid, (map_x, map_z, map_theta) = graph.gt_ena_map.get_map()
+            occupancy = np.full(grid.shape, -1, dtype=np.int8)
+            occupancy[grid == 255] = 0
+            occupancy = occupancy[::-1, :]
+            height, width = occupancy.shape
+            rr.log(
+                "world/ground_truth_exploration_map",
+                rr.GridMap(
+                    data=occupancy.tobytes(),
+                    format=rr.components.ImageFormat(
+                        width=width,
+                        height=height,
+                        color_model="L",
+                        channel_datatype="U8",
+                    ),
+                    cell_size=graph.gt_ena_map.resolution,
+                    translation=[map_x, 0.0, map_z],
+                    rotation_axis_angle=rr.components.RotationAxisAngle(
+                        [1.0, 0.0, 0.0], np.pi / 2
+                    ),
+                    colormap=rr.components.Colormap.RvizMap,
+                    opacity=0.75,
+                ),
+            )
+            rr.log(
+                "world/ground_truth_exploration_map_info",
+                rr.TextDocument(
+                    f"Ground-truth map origin: x={map_x:.3f} m, z={map_z:.3f} m; "
+                    f"theta={map_theta:.3f} rad; "
+                    f"resolution={graph.gt_ena_map.resolution:.3f} m/cell; "
+                    f"observed pixels={graph.gt_ena_map.count_pixels():,}"
+                ),
+            )
 
     def log_ground_truth(self, observation):
         """Draw the simulator pose next to the odometry pose the robot believes."""
